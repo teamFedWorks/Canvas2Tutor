@@ -192,23 +192,114 @@ class MigrationPipeline:
 
 def main():
     """Main entry point"""
-    if len(sys.argv) < 2:
-        print("Usage: python Canvas_Converter.py <course_directory> [output_directory]")
-        print()
-        print("Example:")
-        print("  python Canvas_Converter.py ./cs-2000")
-        print("  python Canvas_Converter.py ./cs-2000 ./output")
-        sys.exit(1)
+    import argparse
     
-    course_dir = sys.argv[1]
-    output_dir = sys.argv[2] if len(sys.argv) > 2 else None
+    parser = argparse.ArgumentParser(
+        description='Convert Canvas LMS course to Tutor LMS format',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python Canvas_Converter.py ./cs-1143
+  python Canvas_Converter.py ./cs-1143 ./output
+  python Canvas_Converter.py ./cs-1143 --upload
+  python Canvas_Converter.py ./cs-1143 --upload --env-file .env.production
+        """
+    )
     
-    pipeline = MigrationPipeline(course_dir, output_dir)
+    parser.add_argument(
+        'course_directory',
+        type=str,
+        help='Path to Canvas course export directory'
+    )
+    
+    parser.add_argument(
+        'output_directory',
+        type=str,
+        nargs='?',
+        default=None,
+        help='Optional output directory (default: course_dir/tutor_lms_output)'
+    )
+    
+    parser.add_argument(
+        '--upload',
+        action='store_true',
+        help='Upload to MongoDB after conversion'
+    )
+    
+    parser.add_argument(
+        '--env-file',
+        type=str,
+        default='.env',
+        help='Path to .env file for MongoDB configuration (default: .env)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Run conversion pipeline
+    pipeline = MigrationPipeline(args.course_directory, args.output_directory)
     report = pipeline.run()
     
     # Exit with error code if migration failed
     if report.status == ReportStatus.FAILURE:
         sys.exit(1)
+    
+    # Upload to MongoDB if requested
+    if args.upload:
+        print()
+        print("=" * 80)
+        print("UPLOADING TO MONGODB")
+        print("=" * 80)
+        print()
+        
+        try:
+            from pathlib import Path
+            from src.config.mongodb_config import MongoDBConfig
+            from src.exporters.mongodb_uploader import MongoDBUploader
+            
+            # Determine course JSON path
+            if args.output_directory:
+                output_dir = Path(args.output_directory)
+            else:
+                output_dir = Path(args.course_directory) / "tutor_lms_output"
+            
+            course_json_path = output_dir / "tutor_course.json"
+            
+            if not course_json_path.exists():
+                print(f"❌ Error: Course JSON not found at {course_json_path}")
+                sys.exit(1)
+            
+            # Load MongoDB configuration
+            env_file = Path(args.env_file) if Path(args.env_file).exists() else None
+            config = MongoDBConfig(env_file)
+            
+            # Create uploader and upload
+            uploader = MongoDBUploader(config)
+            
+            if not uploader.connect():
+                print("❌ Failed to connect to MongoDB")
+                sys.exit(1)
+            
+            success = uploader.upload_course(course_json_path)
+            uploader.disconnect()
+            
+            if success:
+                print()
+                print("=" * 80)
+                print("CONVERSION AND UPLOAD COMPLETE")
+                print("=" * 80)
+            else:
+                print("❌ Upload failed")
+                sys.exit(1)
+                
+        except ImportError:
+            print("❌ MongoDB dependencies not installed.")
+            print("   Install with: pip install pymongo python-dotenv")
+            sys.exit(1)
+        except Exception as e:
+            print(f"❌ Upload error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
 
 if __name__ == "__main__":
