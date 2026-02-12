@@ -170,8 +170,4 @@ For issues or questions:
 2. Review `IMPORT_INSTRUCTIONS.md` in output directory
 3. Consult the architecture documentation
 
----
 
-**Version**: 2.0.0  
-**Status**: Production-Ready  
-**Quality Bar**: Zero silent data loss, comprehensive error reporting, deterministic output
