@@ -49,7 +49,7 @@ python Canvas_Converter.py <course_directory> <output_directory>
 ### Example
 
 ```bash
-python Canvas_Converter.py ./cs-2000
+python Canvas_Converter.py ./cs-1143
 ```
 
 ## 📂 Output Structure
