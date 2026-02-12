@@ -1,241 +1,215 @@
-import xml.etree.ElementTree as ET
-import os
-import json
+"""
+Production Canvas → Tutor LMS Migration Pipeline
+
+This is the main entry point for the migration pipeline.
+Orchestrates all 5 stages of the migration process.
+"""
+
+import sys
+import time
 from pathlib import Path
-import html
-import re
+from typing import Optional
+
+from src.models.migration_report import MigrationReport, ReportStatus
+from src.stages.validator import Validator
+from src.stages.parser import Parser
+from src.transformers.course_transformer import CourseTransformer
+from src.exporters.tutor_exporter import TutorExporter
+from src.exporters.report_generator import ReportGenerator
 
 
-class EnhancedCanvasConverter:
+class MigrationPipeline:
     """
-    FINAL Enhanced Canvas → Tutor LMS Converter
-
-    ✔ Lessons
-    ✔ Quizzes
-    ✔ Assignments
-    ✔ Loose XML inside random hash folders
+    Main migration pipeline orchestrator.
+    
+    Executes all 5 stages:
+    1. Validation & Inventory
+    2. Semantic Parsing
+    3. Content Resolution (integrated into transformer)
+    4. Tutor LMS Transformation
+    5. Export & Verification
     """
-
-    SYSTEM_XML = {
-        "imsmanifest.xml",
-        "assignment_settings.xml",
-        "course_settings.xml"
-    }
-
-    def __init__(self, course_folder):
-        self.course_folder = Path(course_folder)
-        self.manifest_path = self.course_folder / "imsmanifest.xml"
-
-        self.wiki_content_path = self.course_folder / "wiki_content"
-        self.non_cc_assessments_path = self.course_folder / "non_cc_assessments"
-        self.web_resources_path = self.course_folder / "web_resources"
-
-        self.output_path = self.course_folder / "tutor_lms_output"
-        self.output_path.mkdir(exist_ok=True)
-
-        self.stats = {
-            "html_files": 0,
-            "xml_files": 0,
-            "quizzes": 0,
-            "assignments": 0,
-            "loose_xml": 0,
-            "total_lessons": 0,
-            "missing_files": 0,
-            "assignment_folders_found": 0
-        }
-
-    # ------------------------------------------------------------------
-    # MAIN PIPELINE
-    # ------------------------------------------------------------------
-
-    def generate_tutor_lms_structure(self):
-        print("=" * 72)
-        print("FINAL CANVAS → TUTOR LMS CONVERTER (NO DATA LOSS)")
-        print("=" * 72)
-
-        print("\n[1/6] Parsing manifest...")
-        course_structure, resources = self.parse_manifest()
-        if not course_structure:
-            return
-
-        print(f"✓ Course: {course_structure['title']}")
-        print(f"✓ Modules: {len(course_structure['modules'])}")
-
-        print("\n[2/6] Discovering assignments...")
-        assignment_folders = self._discover_assignment_folders()
-
-        print("\n[3/6] Generating migration guide...")
-        migration_guide = self._create_migration_guide(course_structure)
-
-        print("\n[4/6] Extracting manifest content...")
-        self._extract_all_content(course_structure, resources, assignment_folders)
-
-        print("\n[5/6] Discovering & converting loose XML...")
-        self._process_loose_xml_files()
-
-        print("\n[6/6] Saving outputs...")
-        self._save_outputs(course_structure, migration_guide)
-
-        self._print_stats()
-
-    # ------------------------------------------------------------------
-    # LOOSE XML HANDLING (THIS IS WHAT YOU WERE MISSING)
-    # ------------------------------------------------------------------
-
-    def _process_loose_xml_files(self):
-        output_dir = self.output_path / "lessons" / "xml_converted"
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        xml_files = []
-        for root, _, files in os.walk(self.course_folder):
-            if "tutor_lms_output" in root:
-                continue
-
-            for file in files:
-                if file.lower().endswith(".xml") and file not in self.SYSTEM_XML:
-                    xml_files.append(Path(root) / file)
-
-        print(f"  ✓ Found {len(xml_files)} loose XML files")
-
-        for xml_file in xml_files:
-            self._convert_loose_xml(xml_file, output_dir)
-
-    def _convert_loose_xml(self, xml_path, output_dir):
+    
+    def __init__(self, course_directory: Path, output_directory: Optional[Path] = None):
+        """
+        Initialize migration pipeline.
+        
+        Args:
+            course_directory: Path to Canvas course export directory
+            output_directory: Path to output directory (default: course_dir/tutor_lms_output)
+        """
+        self.course_directory = Path(course_directory)
+        
+        if output_directory is None:
+            self.output_directory = self.course_directory / "tutor_lms_output"
+        else:
+            self.output_directory = Path(output_directory)
+        
+        self.output_directory.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize report
+        self.report = MigrationReport(
+            status=ReportStatus.SUCCESS,
+            source_directory=str(self.course_directory),
+            output_directory=str(self.output_directory)
+        )
+    
+    def run(self) -> MigrationReport:
+        """
+        Execute the complete migration pipeline.
+        
+        Returns:
+            MigrationReport with results
+        """
+        start_time = time.time()
+        
+        print("=" * 80)
+        print("CANVAS → TUTOR LMS MIGRATION PIPELINE v2.0")
+        print("=" * 80)
+        print()
+        
         try:
-            tree = ET.parse(xml_path)
-            root = tree.getroot()
-
-            content = ""
-
-            for tag in ("body", "text", "content"):
-                elem = root.find(f".//{tag}")
-                if elem is not None and elem.text:
-                    content = elem.text
-                    break
-
-            if not content:
-                content = ET.tostring(root, encoding="unicode", method="text")
-
-            content = self._clean_html(content)
-
-            if not content.strip():
-                return
-
-            filename = output_dir / f"{xml_path.stem}.html"
-            self._save_html_file(filename, xml_path.stem, content)
-
-            self.stats["xml_files"] += 1
-            self.stats["loose_xml"] += 1
-            self.stats["total_lessons"] += 1
-
-            print(f"  ✓ XML → HTML: {xml_path.name}")
-
+            # Stage 1: Validation & Inventory
+            print("[1/5] Validating Canvas export structure...")
+            validation_report = self._stage_1_validate()
+            self.report.validation_report = validation_report
+            
+            if not validation_report.passed:
+                print("❌ Validation failed. See report for details.")
+                self.report.status = ReportStatus.FAILURE
+                return self._finalize_report(start_time)
+            
+            print(f"✓ Validation passed")
+            print(f"  - Found {validation_report.inventory.pages} pages")
+            print(f"  - Found {validation_report.inventory.modules} modules")
+            print()
+            
+            # Stage 2: Semantic Parsing
+            print("[2/5] Parsing Canvas content...")
+            canvas_course, parse_report = self._stage_2_parse()
+            self.report.parse_report = parse_report
+            
+            if canvas_course is None:
+                print("❌ Parsing failed. See report for details.")
+                self.report.status = ReportStatus.FAILURE
+                return self._finalize_report(start_time)
+            
+            self.report.source_course_title = canvas_course.title
+            self.report.source_content_counts = canvas_course.get_content_counts()
+            
+            print(f"✓ Parsed course: {canvas_course.title}")
+            print(f"  - Modules: {len(canvas_course.modules)}")
+            print(f"  - Pages: {len(canvas_course.pages)}")
+            print(f"  - Assignments: {len(canvas_course.assignments)}")
+            print(f"  - Quizzes: {len(canvas_course.quizzes)}")
+            print()
+            
+            # Stage 3 & 4: Transformation (includes content resolution)
+            print("[3/5] Transforming to Tutor LMS format...")
+            tutor_course, transformation_report = self._stage_4_transform(canvas_course)
+            self.report.transformation_report = transformation_report
+            
+            self.report.migrated_content_counts = tutor_course.get_content_counts()
+            
+            print(f"✓ Transformed to Tutor LMS")
+            print(f"  - Topics: {len(tutor_course.topics)}")
+            print(f"  - Lessons: {transformation_report.lessons_created}")
+            print(f"  - Quizzes: {transformation_report.quizzes_created}")
+            print(f"  - Questions: {transformation_report.questions_created}")
+            print()
+            
+            # Stage 5: Export & Verification
+            print("[4/5] Exporting to JSON...")
+            verification_report = self._stage_5_export(tutor_course)
+            self.report.verification_report = verification_report
+            
+            print(f"✓ Exported to {self.output_directory}")
+            print(f"  - Output size: {verification_report.total_output_size_mb:.2f} MB")
+            print()
+            
+            # Generate reports
+            print("[5/5] Generating migration reports...")
+            self._generate_reports()
+            
+            print("✓ Reports generated")
+            print()
+            
         except Exception as e:
-            print(f"  ⚠️ Failed XML {xml_path.name}: {e}")
-            self.stats["missing_files"] += 1
-
-    # ------------------------------------------------------------------
-    # EXISTING METHODS (UNCHANGED LOGIC)
-    # ------------------------------------------------------------------
-
-    def _discover_assignment_folders(self):
-        folders = []
-        for item in self.course_folder.iterdir():
-            if item.is_dir() and (item / "assignment_settings.xml").exists():
-                folders.append(item)
-                self.stats["assignment_folders_found"] += 1
-        return folders
-
-    def parse_manifest(self):
-        if not self.manifest_path.exists():
-            print("❌ imsmanifest.xml not found")
-            return None, None
-
-        tree = ET.parse(self.manifest_path)
-        root = tree.getroot()
-
-        title = self._extract_course_title(root)
-        resources = self._build_resource_map(root)
-
-        structure = {"title": title, "modules": []}
-
-        org = root.find(".//organization")
-        if org:
-            for item in org.findall(".//item"):
-                parsed = self._parse_item(item, resources)
-                if parsed:
-                    structure["modules"].append(parsed)
-
-        return structure, resources
-
-    def _extract_course_title(self, root):
-        title = root.find(".//title/string")
-        return title.text if title is not None else "Course"
-
-    def _build_resource_map(self, root):
-        res = {}
-        for r in root.findall(".//resource"):
-            res[r.get("identifier")] = {
-                "href": r.get("href"),
-                "type": r.get("type")
-            }
-        return res
-
-    def _parse_item(self, item, resources):
-        title = item.findtext("title", default="Untitled")
-        obj = {"title": title, "items": []}
-
-        ref = item.get("identifierref")
-        if ref and ref in resources:
-            obj["content_file"] = resources[ref]["href"]
-
-        for child in item.findall("item"):
-            obj["items"].append(self._parse_item(child, resources))
-
-        return obj
-
-    def _extract_all_content(self, course_structure, resources, assignment_folders):
-        lessons_dir = self.output_path / "lessons"
-        lessons_dir.mkdir(exist_ok=True)
-
-    def _clean_html(self, content):
-        content = html.unescape(content)
-        content = re.sub(r"\$IMS-CC-FILEBASE\$/", "../web_resources/", content)
-        return content.strip()
-
-    def _save_html_file(self, filepath, title, content):
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(f"""<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>{html.escape(title)}</title></head>
-<body>{content}</body>
-</html>""")
-
-    def _create_migration_guide(self, course_structure):
-        return f"MIGRATION GUIDE: {course_structure['title']}"
-
-    def _save_outputs(self, course_structure, migration_guide):
-        with open(self.output_path / "migration_guide.txt", "w") as f:
-            f.write(migration_guide)
-
-        with open(self.output_path / "course_structure.json", "w") as f:
-            json.dump(course_structure, f, indent=2)
-
-    def _print_stats(self):
-        print("\n" + "=" * 72)
-        for k, v in self.stats.items():
-            print(f"{k:25}: {v}")
-        print("=" * 72)
+            print(f"❌ Unexpected error: {str(e)}")
+            self.report.status = ReportStatus.FAILURE
+            import traceback
+            traceback.print_exc()
+        
+        return self._finalize_report(start_time)
+    
+    def _stage_1_validate(self):
+        """Stage 1: Validation & Inventory"""
+        validator = Validator(self.course_directory)
+        return validator.validate()
+    
+    def _stage_2_parse(self):
+        """Stage 2: Semantic Parsing"""
+        parser = Parser(self.course_directory)
+        return parser.parse()
+    
+    def _stage_4_transform(self, canvas_course):
+        """Stage 4: Tutor LMS Transformation"""
+        transformer = CourseTransformer()
+        return transformer.transform(canvas_course)
+    
+    def _stage_5_export(self, tutor_course):
+        """Stage 5: Export & Verification"""
+        exporter = TutorExporter(self.output_directory, self.course_directory)
+        return exporter.export(tutor_course)
+    
+    def _generate_reports(self):
+        """Generate migration reports"""
+        report_generator = ReportGenerator(self.output_directory)
+        report_generator.generate(self.report)
+    
+    def _finalize_report(self, start_time: float) -> MigrationReport:
+        """Finalize and return migration report"""
+        self.report.execution_time_seconds = time.time() - start_time
+        self.report.aggregate_errors()
+        
+        print("=" * 80)
+        print("MIGRATION COMPLETE")
+        print("=" * 80)
+        print(f"Status: {self.report.status.value.upper()}")
+        print(f"Errors: {self.report.total_errors}")
+        print(f"Warnings: {self.report.total_warnings}")
+        print(f"Execution time: {self.report.execution_time_seconds:.2f}s")
+        print()
+        print(f"Output directory: {self.output_directory}")
+        print(f"  - tutor_course.json")
+        print(f"  - migration_report.json")
+        print(f"  - migration_report.html")
+        print(f"  - IMPORT_INSTRUCTIONS.md")
+        print("=" * 80)
+        
+        return self.report
 
 
-# ----------------------------------------------------------------------
-# ENTRY POINT
-# ----------------------------------------------------------------------
+def main():
+    """Main entry point"""
+    if len(sys.argv) < 2:
+        print("Usage: python Canvas_Converter.py <course_directory> [output_directory]")
+        print()
+        print("Example:")
+        print("  python Canvas_Converter.py ./cs-2000")
+        print("  python Canvas_Converter.py ./cs-2000 ./output")
+        sys.exit(1)
+    
+    course_dir = sys.argv[1]
+    output_dir = sys.argv[2] if len(sys.argv) > 2 else None
+    
+    pipeline = MigrationPipeline(course_dir, output_dir)
+    report = pipeline.run()
+    
+    # Exit with error code if migration failed
+    if report.status == ReportStatus.FAILURE:
+        sys.exit(1)
+
 
 if __name__ == "__main__":
-    import sys
-
-    COURSE_FOLDER = sys.argv[1] if len(sys.argv) > 1 else "cs-2000"
-
-    converter = EnhancedCanvasConverter(COURSE_FOLDER)
-    converter.generate_tutor_lms_structure()
+    main()

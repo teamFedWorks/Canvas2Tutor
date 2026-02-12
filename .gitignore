@@ -1,0 +1,6 @@
+# Logs and output files
+migration.log
+concise_output.txt
+debug_assignments_output.txt
+*.log
+*.txt
