@@ -48,12 +48,12 @@ class MongoDBUploader:
             True if connection successful, False otherwise
         """
         try:
-            print("🔌 Connecting to MongoDB...")
+            print("[DB] Connecting to MongoDB...")
             
             # Validate configuration
             is_valid, error_msg = self.config.validate()
             if not is_valid:
-                print(f"❌ Configuration error: {error_msg}")
+                print(f"[FAIL] Configuration error: {error_msg}")
                 return False
             
             # Create MongoDB client
@@ -68,18 +68,18 @@ class MongoDBUploader:
             # Get database
             self.db = self.client[self.config.database_name]
             
-            print(f"✅ Connected to MongoDB database: {self.config.database_name}")
+            print(f"[DONE] Connected to MongoDB database: {self.config.database_name}")
             return True
             
         except Exception as e:
-            print(f"❌ MongoDB connection failed: {str(e)}")
+            print(f"[FAIL] MongoDB connection failed: {str(e)}")
             return False
     
     def disconnect(self):
         """Disconnect from MongoDB."""
         if self.client:
             self.client.close()
-            print("👋 MongoDB connection closed.")
+            print("[INFO] MongoDB connection closed.")
     
     @staticmethod
     def slugify(text: str) -> str:
@@ -167,10 +167,10 @@ class MongoDBUploader:
                 real_modules = tutor_course_data.get('topics', [])
             
             if not real_modules:
-                print("⚠️ No modules/topics found. Check JSON structure.")
+                print("[WARN] No modules/topics found. Check JSON structure.")
                 return None
             
-            print(f"🔍 Found {len(real_modules)} modules to process...")
+            print(f"[INFO] Found {len(real_modules)} modules to process...")
             
             # Process each module/topic
             for source_module in real_modules:
@@ -248,7 +248,7 @@ class MongoDBUploader:
             }
             
         except Exception as e:
-            print(f"❌ Data transformation failed: {str(e)}")
+            print(f"[FAIL] Data transformation failed: {str(e)}")
             import traceback
             traceback.print_exc()
             return None
@@ -265,38 +265,38 @@ class MongoDBUploader:
         """
         try:
             # Load JSON file
-            print(f"📖 Reading course data from {course_json_path}...")
+            print(f"[READ] Reading course data from {course_json_path}...")
             with open(course_json_path, 'r', encoding='utf-8') as f:
                 course_data = json.load(f)
             
             # Transform data
-            print("🔄 Transforming data to MongoDB schema...")
+            print("[TRANS] Transforming data to MongoDB schema...")
             transformed = self.transform_course_data(course_data)
             
             if not transformed:
-                print("❌ Data transformation failed.")
+                print("[FAIL] Data transformation failed.")
                 return False
             
             course_document = transformed['course_document']
             curriculum_items = transformed['curriculum_items']
             
             # Insert curriculum items
-            print(f"🚀 Inserting {len(curriculum_items)} curriculum items...")
+            print(f"[UPLOAD] Inserting {len(curriculum_items)} curriculum items...")
             curriculum_collection = self.db[self.config.curriculum_collection]
             
             if curriculum_items:
                 result = curriculum_collection.insert_many(curriculum_items)
-                print(f"✅ Inserted {len(result.inserted_ids)} curriculum items successfully.")
+                print(f"[DONE] Inserted {len(result.inserted_ids)} curriculum items successfully.")
             else:
-                print("⚠️ No curriculum items to insert.")
+                print("[WARN] No curriculum items to insert.")
             
             # Insert course document
-            print(f"🚀 Creating course: \"{course_document['title']}\"...")
+            print(f"[UPLOAD] Creating course: \"{course_document['title']}\"...")
             course_collection = self.db[self.config.course_collection]
             course_collection.insert_one(course_document)
-            print("✅ Course document created successfully.")
+            print("[DONE] Course document created successfully.")
             
-            print("\n🎉 Upload complete!")
+            print("\n[SUCCESS] Upload complete!")
             print(f"   Course ID: {course_document['_id']}")
             print(f"   Course URL: {course_document['courseUrl']}")
             print(f"   Total Items: {len(curriculum_items)}")
@@ -304,7 +304,7 @@ class MongoDBUploader:
             return True
             
         except Exception as e:
-            print(f"❌ Upload failed: {str(e)}")
+            print(f"[FAIL] Upload failed: {str(e)}")
             import traceback
             traceback.print_exc()
             return False

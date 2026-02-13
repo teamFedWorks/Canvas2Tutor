@@ -29,7 +29,7 @@ def main():
     
     # Parse command line arguments
     parser = argparse.ArgumentParser(
-        description='Upload converted Tutor LMS course to MongoDB',
+        description='Upload converted Tutor LMS course to MongoDB \ NextGen LMS',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -59,18 +59,23 @@ Environment Variables:
     
     args = parser.parse_args()
     
-    # Validate course JSON path
+    # --- Step 1: Input Validation ---
+    
+    # Check if the course JSON file actually exists at the provided path.
     course_json_path = Path(args.course_json)
     if not course_json_path.exists():
-        print(f"❌ Error: Course JSON file not found: {course_json_path}")
+        print(f"[FAIL] Error: Course JSON file not found: {course_json_path}")
         sys.exit(1)
     
-    # Check for .env file
+    # Try to find the .env file for database credentials.
     env_file = Path(args.env_file)
     if not env_file.exists():
-        print(f"⚠️ Warning: .env file not found at {env_file}")
+        # If .env is missing, we warn the user but proceed (relying on system env variables).
+        print(f"[WARN] Warning: .env file not found at {env_file}")
         print("   Make sure MONGODB_URI environment variable is set.")
         env_file = None
+    
+    # --- Step 2: Upload Initialization ---
     
     print("=" * 80)
     print("MONGODB UPLOAD - TUTOR LMS COURSE")
@@ -80,16 +85,17 @@ Environment Variables:
     print(f"Env File: {env_file if env_file else 'Not specified (using environment variables)'}")
     print()
     
-    # Load configuration
+    # Load DB configuration from the environment or .env file.
     config = MongoDBConfig(env_file)
     
-    # Create uploader
+    # Create the uploader object which handles the MongoDB client session.
     uploader = MongoDBUploader(config)
     
     try:
-        # Connect to MongoDB
+        # Step 3: Establish Connection.
+        # This will 'ping' the database to ensurecredentials and networking are correct.
         if not uploader.connect():
-            print("\n❌ Failed to connect to MongoDB.")
+            print("\n[FAIL] Failed to connect to MongoDB.")
             print("\nTroubleshooting:")
             print("1. Check that MONGODB_URI is set correctly in .env or environment")
             print("2. Verify MongoDB server is running and accessible")
@@ -98,7 +104,8 @@ Environment Variables:
         
         print()
         
-        # Upload course
+        # Step 4: Perform Data Upload.
+        # Reads the JSON course and inserts it into Course and Curriculum collections.
         success = uploader.upload_course(course_json_path)
         
         if success:
@@ -106,7 +113,7 @@ Environment Variables:
             print("=" * 80)
             print("UPLOAD COMPLETE")
             print("=" * 80)
-            print(f"✅ Course successfully uploaded to MongoDB")
+            print(f"[SUCCESS] Course successfully uploaded to MongoDB")
             print(f"   Database: {config.database_name}")
             print(f"   Course Collection: {config.course_collection}")
             print(f"   Curriculum Collection: {config.curriculum_collection}")
@@ -117,15 +124,15 @@ Environment Variables:
             print("=" * 80)
             print("UPLOAD FAILED")
             print("=" * 80)
-            print("❌ Course upload failed. See error messages above.")
+            print("[FAIL] Course upload failed. See error messages above.")
             print("=" * 80)
             sys.exit(1)
         
     except KeyboardInterrupt:
-        print("\n\n⚠️ Upload cancelled by user.")
+        print("\n\n[WARN] Upload cancelled by user.")
         sys.exit(1)
     except Exception as e:
-        print(f"\n❌ Unexpected error: {str(e)}")
+        print(f"\n[FAIL] Unexpected error: {str(e)}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

@@ -1,5 +1,5 @@
 """
-Canvas to Tutor LMS Migration Pipeline
+Canvas to Tutor LMS Migration Pipeline \ NextGen LMS
 """
 
 __version__ = "2.0.0"

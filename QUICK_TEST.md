@@ -64,23 +64,34 @@ python Canvas_Converter.py ./test_course
 **Expected Output:**
 ```
 ================================================================================
-CANVAS → TUTOR LMS MIGRATION PIPELINE v2.0
+CANVAS → TUTOR LMS MIGRATION PIPELINE \ NextGen LMS v2.0
 ================================================================================
 
 [1/5] Validating Canvas export structure...
-✓ Validation passed
+[DONE] Validation passed
+  - Found 12 pages
+  - Found 5 modules
 
 [2/5] Parsing Canvas content...
-✓ Parsed course
+[DONE] Parsed course: CS-1143 Introduction to Python
+  - Modules: 5
+  - Pages: 12
+  - Assignments: 4
+  - Quizzes: 3
 
 [3/5] Transforming to Tutor LMS format...
-✓ Transformed to Tutor LMS
+[DONE] Transformed to Tutor LMS
+  - Topics: 5
+  - Lessons: 12
+  - Quizzes: 3
+  - Assignments: 4
 
 [4/5] Exporting to JSON...
-✓ Exported to ./test_course/tutor_lms_output
+[DONE] Exported to ./test_course/tutor_lms_output
+  - Output size: 2.45 MB
 
 [5/5] Generating migration reports...
-✓ Reports generated
+[DONE] Reports generated
 
 ================================================================================
 MIGRATION COMPLETE

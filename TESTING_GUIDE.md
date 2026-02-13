@@ -1,6 +1,6 @@
-# Testing Guide - Canvas to Tutor LMS Migration Pipeline
+# Testing Guide - Canvas to Tutor LMS Migration Pipeline \ NextGen LMS
 
-## 🧪 Quick Start Testing
+## [QUICK START]
 
 ### Step 1: Install Dependencies
 
@@ -43,9 +43,9 @@ python Canvas_Converter.py "C:\path\to\your\canvas_export"
 
 ---
 
-## 📋 Detailed Testing Steps
+## [DETAILED STEPS]
 
-### 1️⃣ Dependency Installation Test
+### [1] Dependency Installation Test
 
 ```bash
 pip install -r requirements.txt
@@ -58,12 +58,12 @@ Successfully installed lxml-4.9.0 pydantic-2.0.0 beautifulsoup4-4.12.0 bleach-6.
 
 **Verify Installation:**
 ```bash
-python -c "import lxml; import pydantic; import bs4; print('✓ All dependencies installed')"
+python -c "import lxml; import pydantic; import bs4; print('[DONE] All dependencies installed')"
 ```
 
 ---
 
-### 2️⃣ Create Minimal Test Course
+### [2] Create Minimal Test Course
 
 Create this structure to test basic functionality:
 
@@ -127,7 +127,7 @@ python Canvas_Converter.py ./test_course
 **Expected Output:**
 ```
 ================================================================================
-CANVAS → TUTOR LMS MIGRATION PIPELINE v2.0
+CANVAS → TUTOR LMS MIGRATION PIPELINE \ NextGen LMS v2.0
 ================================================================================
 
 [1/5] Validating Canvas export structure...

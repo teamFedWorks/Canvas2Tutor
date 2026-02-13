@@ -41,45 +41,56 @@ class Validator:
     
     def __init__(self, course_directory: Path):
         """
-        Initialize validator.
+        Initialize the Validator.
         
         Args:
-            course_directory: Path to Canvas course export directory
+            course_directory: The root folder containing the unzipped Canvas export.
         """
         self.course_directory = course_directory
+        # The manifest is the 'brain' of the Canvas export; we expect it at the root.
         self.manifest_path = course_directory / CANVAS_PATHS['MANIFEST']
         
+        # Track errors, files known by the manifest, and actual physical files.
         self.errors: List[MigrationError] = []
         self.referenced_files: Set[str] = set()
         self.all_files: Set[str] = set()
     
     def validate(self) -> ValidationReport:
         """
-        Run complete validation and inventory.
+        Run the complete 5-step validation and inventory process.
+        
+        This method ensures the package is a valid Canvas export before we 
+        commit to parsing it.
         
         Returns:
-            ValidationReport with results
+            A ValidationReport object documenting the findings.
         """
         report = ValidationReport(passed=False, timestamp=datetime.now())
         
-        # Step 1: Validate directory structure
+        # Step 1: Validate directory structure.
+        # Check if the folder exists and contains fundamental IMS-CC files.
         if not self._validate_directory_structure(report):
             return report
         
-        # Step 2: Validate manifest file
+        # Step 2: Validate manifest file.
+        # Ensure 'imsmanifest.xml' is present and is valid XML.
         if not self._validate_manifest(report):
             return report
         
-        # Step 3: Build file inventory
+        # Step 3: Build file inventory.
+        # Scan the entire folder to see what files are actually present on disk.
         self._build_file_inventory(report)
         
-        # Step 4: Validate file references
+        # Step 4: Validate file references.
+        # Cross-reference the manifest against the disk to find 'broken' links.
         self._validate_file_references(report)
         
-        # Step 5: Detect orphaned content
+        # Step 5: Detect orphaned content.
+        # Find files that exist on disk but aren't mentioned in the manifest.
         self._detect_orphaned_content(report)
         
-        # Determine if validation passed
+        # Determine if validation passed.
+        # Only 'CRITICAL' errors (like missing manifest) actually fail the validation.
         report.passed = len([e for e in self.errors if e.severity == ErrorSeverity.CRITICAL]) == 0
         report.errors = self.errors
         

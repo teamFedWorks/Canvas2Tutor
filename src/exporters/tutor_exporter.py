@@ -22,38 +22,45 @@ class TutorExporter:
     
     def __init__(self, output_directory: Path, source_directory: Path = None):
         """
-        Initialize exporter.
+        Initialize the Exporter.
         
         Args:
-            output_directory: Path to output directory
-            source_directory: Path to source Canvas export directory (required for asset copying)
+            output_directory: Where the final Tutor LMS files will be saved.
+            source_directory: The original Canvas folder (needed to find images/files).
         """
         self.output_directory = output_directory
         self.source_directory = source_directory
         self.errors: list[MigrationError] = []
         
-        # Create output directory
+        # Ensure the output folder exists before we try to write to it.
         ensure_directory_exists(output_directory)
     
     def export(self, tutor_course: TutorCourse) -> VerificationReport:
         """
-        Export Tutor course to JSON and copy assets.
+        Convert the internal TutorCourse model into physical files on disk.
+        
+        This process involves:
+        1. Generating a master JSON file ('tutor_course.json').
+        2. Copying actual images and documents from Canvas to the output.
+        3. Saving individual HTML versions of lessons for review.
+        4. Creating import instructions for the end-user.
         
         Args:
-            tutor_course: Tutor course model
+            tutor_course: The fully built Tutor LMS course model.
             
         Returns:
-            VerificationReport
+            A VerificationReport containing the status of the export.
         """
         report = VerificationReport(timestamp=datetime.now())
         report.output_directory = str(self.output_directory)
         report.output_format = "json"
         
         try:
-            # Convert course to dictionary
+            # Step 1: Convert our complex Python objects into a simple nested dictionary.
             course_dict = self._course_to_dict(tutor_course)
             
-            # Write to JSON file
+            # Step 2: Save the dictionary as a single 'tutor_course.json' file.
+            # Use UTF-8 encoding and indentation for readability.
             output_file = self.output_directory / "tutor_course.json"
             with open(output_file, 'w', encoding='utf-8') as f:
                 json.dump(course_dict, f, indent=2, ensure_ascii=False)
@@ -90,23 +97,24 @@ class TutorExporter:
         return report
 
     def _copy_assets(self):
-        """Copy assets from source to output"""
+        """
+        Transfer binary assets (images, PDFs, etc.) from the source to the output.
+        
+        Canvas stores these in a 'web_resources' folder; we move them to 'assets/'.
+        """
         import shutil
         
-        # Source asset directories
         source_assets = self.source_directory / "web_resources"
-        
-        # Destination asset directory
         dest_assets = self.output_directory / "assets"
         
         if source_assets.exists():
-            # Copy entire tree
+            # If the assets folder already exists in output, clear it first for a clean copy.
             if dest_assets.exists():
                 shutil.rmtree(dest_assets)
             shutil.copytree(source_assets, dest_assets)
-            print(f"✓ Copied assets from {source_assets.name} to assets/")
+            print(f"[DONE] Copied assets from {source_assets.name} to assets/")
         else:
-            print(f"⚠ Warning: Source assets directory not found at {source_assets}")
+            print(f"[WARN] Source assets directory not found at {source_assets}")
             
     def _export_html_content(self, course: TutorCourse):
         """Export content to HTML files"""
@@ -152,7 +160,7 @@ class TutorExporter:
                 with open(topic_dir / filename, 'w', encoding='utf-8') as f:
                     f.write(html_content)
                     
-        print(f"✓ exported HTML content to lessons/")
+        print(f"[DONE] exported HTML content to lessons/")
     
     def _course_to_dict(self, course: TutorCourse) -> Dict[str, Any]:
         """

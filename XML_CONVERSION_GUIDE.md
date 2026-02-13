@@ -1,6 +1,6 @@
 # XML to HTML Conversion - Examples
 
-The Canvas to Tutor LMS migration pipeline **automatically converts XML files to HTML**, including:
+The Canvas to Tutor LMS migration pipeline \ NextGen LMS **automatically converts XML files to HTML**, including:
 
 ## ✅ Supported XML Types
 
