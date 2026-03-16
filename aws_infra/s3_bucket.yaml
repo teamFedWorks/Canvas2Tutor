@@ -1,0 +1,15 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create S3 bucket for Eduvatehub course shells
+
+Resources:
+  EduvatehubBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # Bucket names must be lowercase and globally unique
+      BucketName: eduvatehub-courseshells-prod
+
+# IMPORTANT NOTE:
+# 1. 'AWS::S3::Object' is NOT a valid CloudFormation resource. AWS does not support
+#    creating individual objects or "folders" via native CloudFormation templates.
+# 2. S3 bucket names MUST be lowercase. 'Eduvatehub-Courseshells' will fail to deploy.
+# 3. To create the folder hierarchy, we will use a post-deployment script (AWS CLI).
