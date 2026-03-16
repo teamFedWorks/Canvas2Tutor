@@ -16,6 +16,9 @@ from ..parsers.assignment_parser import AssignmentParser
 from ..parsers.quiz_parser import QuizParser
 from ..parsers.orphaned_content_handler import OrphanedContentHandler
 from ..parsers.pptx_parser import PptxParser
+from ..observability.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class Parser:
@@ -95,7 +98,7 @@ class Parser:
                     if resource.href and resource.href.lower().endswith('.pptx'):
                         file_path = self.course_directory / resource.href
                         if file_path.exists():
-                            print(f"  Converting PPTX resource: {resource.href}")
+                            logger.info("Converting PPTX resource", extra={"path": resource.href})
                             # Link the converted page to its original manifest identifier.
                             pptx_page = self.pptx_parser.parse_pptx(file_path, identifier=res_id)
                             if pptx_page:
@@ -129,7 +132,7 @@ class Parser:
         # Step 5: Process orphaned content.
         # Sometimes there are files in the package that aren't mentioned in the manifest.
         # We find these (like loose slides or PDFs) and put them in a 'Recovered Content' module.
-        print("  Processing orphaned XML/HTML files...")
+        logger.info("Processing orphaned XML/HTML files")
         referenced_files = set(course.resources.keys())
         orphaned_pages = self.orphaned_handler.process_all_orphaned_content(referenced_files)
         

@@ -17,8 +17,8 @@ import sys
 import argparse
 from pathlib import Path
 
-# Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
+# Add project root to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config.mongodb_config import MongoDBConfig
 from src.exporters.mongodb_uploader import MongoDBUploader

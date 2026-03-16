@@ -1,342 +1,260 @@
 """
-MongoDB Uploader Module
+MongoDB Uploader - Direct LMS Database Writer
 
-Uploads converted Tutor LMS courses to MongoDB database.
-Replaces the JavaScript-based Coursesconvert.js with Python implementation.
+Handles bulk writing of LmsCourse models into five MongoDB collections:
+courses, modules, lessons, quizzes, assignments.
+Also manages the 'migration_jobs' tracking collection.
 """
 
-import json
-import re
-import time
-from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Dict, List, Any, Optional
 from datetime import datetime
+import pymongo
+from pymongo import UpdateOne, ASCENDING
+from bson import ObjectId
 
-try:
-    from pymongo import MongoClient
-    from bson import ObjectId
-    PYMONGO_AVAILABLE = True
-except ImportError:
-    PYMONGO_AVAILABLE = False
-    print("Warning: pymongo not installed. Install with: pip install pymongo")
-
+from ..models.lms_models import LmsCourse, LmsModule, LmsLesson, LmsQuiz, LmsAssignment
 from ..config.mongodb_config import MongoDBConfig
+from ..observability.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class MongoDBUploader:
-    """Handles uploading Tutor LMS courses to MongoDB."""
-    
-    def __init__(self, config: MongoDBConfig):
+    """
+    Directly writes LMS course data to MongoDB collections.
+    """
+
+    def __init__(self, config: Optional[MongoDBConfig] = None):
         """
-        Initialize MongoDB uploader.
-        
-        Args:
-            config: MongoDB configuration
+        Initialize connection to MongoDB using external configuration.
         """
-        if not PYMONGO_AVAILABLE:
-            raise ImportError("pymongo is required. Install with: pip install pymongo")
+        self.config = config or MongoDBConfig()
+        self.client = pymongo.MongoClient(self.config.mongodb_uri)
+        self.db = self.client[self.config.database_name]
         
-        self.config = config
-        self.client: Optional[MongoClient] = None
-        self.db = None
-        
-    def connect(self) -> bool:
-        """
-        Connect to MongoDB.
-        
-        Returns:
-            True if connection successful, False otherwise
-        """
+        # Collections
+        self.col_courses = self.db['courses']
+        self.col_modules = self.db['modules']
+        self.col_lessons = self.db['lessons']
+        self.col_quizzes = self.db['quizzes']
+        self.col_assignments = self.db['assignments']
+        self.col_jobs = self.db['migration_jobs']
+
+        self._ensure_indexes()
+
+    def _ensure_indexes(self):
+        """Build essential indexes for performance and uniqueness."""
         try:
-            print("[DB] Connecting to MongoDB...")
+            # course_id used as shard key or lookup key in sub-collections
+            self.col_courses.create_index([("canvasCourseId", ASCENDING)], unique=True)
+            self.col_modules.create_index([("courseId", ASCENDING), ("order", ASCENDING)])
+            self.col_lessons.create_index([("moduleId", ASCENDING), ("order", ASCENDING)])
+            self.col_quizzes.create_index([("moduleId", ASCENDING), ("order", ASCENDING)])
+            self.col_assignments.create_index([("moduleId", ASCENDING), ("order", ASCENDING)])
             
-            # Validate configuration
-            is_valid, error_msg = self.config.validate()
-            if not is_valid:
-                print(f"[FAIL] Configuration error: {error_msg}")
-                return False
+            # Job monitoring
+            self.col_jobs.create_index([("startedAt", ASCENDING)])
+            logger.info("MongoDB indexes verified/created")
+        except Exception as e:
+            logger.error("Failed to create indexes", extra={"error": str(e)})
+
+    def write_lms_course(self, course: LmsCourse, task_id: str) -> bool:
+        """
+        Performs an idempotent bulk write of the entire course structure.
+        """
+        logger.info("Writing course to MongoDB", extra={
+            "task_id": task_id,
+            "title": course.title,
+            "canvas_id": course.canvas_course_id
+        })
+
+        try:
+            # 1. UPSERT the main course document
+            course_doc = {
+                "title": course.title,
+                "description": course.description,
+                "status": course.status.value,
+                "canvasCourseId": course.canvas_course_id,
+                "instructorId": course.instructor_id,
+                "difficulty": course.difficulty_level,
+                "categories": course.categories,
+                "updatedAt": datetime.utcnow()
+            }
             
-            # Create MongoDB client
-            self.client = MongoClient(
-                self.config.mongodb_uri,
-                **self.config.get_connection_options()
+            result = self.col_courses.update_one(
+                {"canvasCourseId": course.canvas_course_id},
+                {"$set": course_doc, "$setOnInsert": {"createdAt": datetime.utcnow()}},
+                upsert=True
             )
             
-            # Test connection
-            self.client.admin.command('ping')
-            
-            # Get database
-            self.db = self.client[self.config.database_name]
-            
-            print(f"[DONE] Connected to MongoDB database: {self.config.database_name}")
-            return True
-            
-        except Exception as e:
-            print(f"[FAIL] MongoDB connection failed: {str(e)}")
-            return False
-    
-    def disconnect(self):
-        """Disconnect from MongoDB."""
-        if self.client:
-            self.client.close()
-            print("[INFO] MongoDB connection closed.")
-    
-    @staticmethod
-    def slugify(text: str) -> str:
-        """
-        Convert text to URL-friendly slug.
-        
-        Args:
-            text: Text to slugify
-            
-        Returns:
-            Slugified text
-        """
-        if not text:
-            return f'untitled-{int(time.time() * 1000)}'
-        
-        # Convert to lowercase and strip whitespace
-        slug = text.lower().strip()
-        
-        # Replace spaces with hyphens
-        slug = re.sub(r'\s+', '-', slug)
-        
-        # Remove non-word characters (except hyphens)
-        slug = re.sub(r'[^\w\-]+', '', slug)
-        
-        # Replace multiple hyphens with single hyphen
-        slug = re.sub(r'\-\-+', '-', slug)
-        
-        # Add random number to prevent duplicates
-        import random
-        slug = f"{slug}-{random.randint(100, 999)}"
-        
-        return slug
-    
-    @staticmethod
-    def determine_type(title: str) -> str:
-        """
-        Determine content type based on title.
-        
-        Args:
-            title: Content title
-            
-        Returns:
-            Content type: 'Quiz', 'Assignment', or 'Lesson'
-        """
-        title_lower = title.lower()
-        
-        if 'quiz' in title_lower:
-            return 'Quiz'
-        elif 'assignment' in title_lower or 'project' in title_lower:
-            return 'Assignment'
-        else:
-            return 'Lesson'
-    
-    def transform_course_data(self, tutor_course_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        Transform Tutor LMS JSON to MongoDB schema format.
-        
-        Args:
-            tutor_course_data: Tutor LMS course data from JSON
-            
-        Returns:
-            Dictionary with 'course_document' and 'curriculum_items'
-        """
-        try:
-            # Generate IDs
-            course_id = ObjectId()
-            author_id = ObjectId()
-            
-            all_curriculum_items = []
-            course_curriculum_structure = []
-            
-            # Extract modules/topics from the course data
-            # The structure should have 'modules' or 'topics' at the top level
-            modules = tutor_course_data.get('modules', [])
-            
-            # Handle nested structure (like in the JS code)
-            if modules and isinstance(modules, list) and len(modules) > 0:
-                # Check if first module has nested items
-                if isinstance(modules[0], dict) and 'items' in modules[0]:
-                    real_modules = modules[0].get('items', [])
-                else:
-                    real_modules = modules
+            # Retrieve the course _id (either from existing or new)
+            if result.upserted_id:
+                course_id = result.upserted_id
             else:
-                # Try 'topics' key as alternative
-                real_modules = tutor_course_data.get('topics', [])
+                existing = self.col_courses.find_one({"canvasCourseId": course.canvas_course_id}, {"_id": 1})
+                if not existing:
+                    # Fallback case if update somehow didn't yield a doc
+                    logger.error("Course document not found after upsert", extra={"canvas_id": course.canvas_course_id})
+                    return False
+                course_id = existing["_id"]
+
+            # 2. CLEAR existing sub-items for this course to ensure clean overwrite
+            # Since we use courseId as a foreign key, we delete all items linked to this courseId
+            # before re-inserting the new versions.
+            self.col_modules.delete_many({"courseId": course_id})
+            self.col_lessons.delete_many({"courseId": course_id})
+            self.col_quizzes.delete_many({"courseId": course_id})
+            self.col_assignments.delete_many({"courseId": course_id})
             
-            if not real_modules:
-                print("[WARN] No modules/topics found. Check JSON structure.")
-                return None
+            # 3. Process modules and their contents
+            all_lessons = []
+            all_quizzes = []
+            all_assignments = []
             
-            print(f"[INFO] Found {len(real_modules)} modules to process...")
-            
-            # Process each module/topic
-            for source_module in real_modules:
-                topic_id = ObjectId()
-                module_items_references = []
-                
-                # Get module title
-                module_title = source_module.get('title', 'Untitled Module')
-                
-                # Process items inside the module
-                module_items = source_module.get('items', [])
-                
-                for source_item in module_items:
-                    item_id = ObjectId()
-                    item_title = source_item.get('title', 'Untitled Item')
-                    item_type = self.determine_type(item_title)
-                    item_slug = self.slugify(item_title)
-                    
-                    # Create curriculum item document
-                    curriculum_item = {
-                        '_id': item_id,
-                        'courseId': course_id,
-                        'topicId': topic_id,
-                        'title': item_title,
-                        'slug': item_slug,
-                        'type': item_type,
-                        'isHidden': False,
-                        'content': source_item.get('content', '<p>No content provided.</p>'),
-                    }
-                    
-                    all_curriculum_items.append(curriculum_item)
-                    
-                    # Create reference for course schema
-                    module_items_references.append({
-                        'itemId': item_id,
-                        'itemType': item_type,
-                        'title': item_title,
-                        'slug': item_slug
+            for m_index, module in enumerate(course.modules):
+                module_id = ObjectId()
+                module_doc = {
+                    "_id": module_id,
+                    "courseId": course_id,
+                    "title": module.title,
+                    "order": module.order or m_index,
+                    "canvasId": module.canvas_id
+                }
+                self.col_modules.insert_one(module_doc)
+
+                # Collect sub-items
+                for lesson in module.lessons:
+                    all_lessons.append({
+                        "moduleId": module_id,
+                        "courseId": course_id,
+                        "title": lesson.title,
+                        "content": lesson.content,
+                        "status": lesson.status.value,
+                        "order": lesson.order,
+                        "assetUrls": lesson.asset_urls,
+                        "canvasId": lesson.canvas_id
                     })
                 
-                # Add topic to course curriculum structure
-                course_curriculum_structure.append({
-                    '_id': topic_id,
-                    'title': module_title,
-                    'summary': source_module.get('description', ''),
-                    'locked': False,
-                    'items': module_items_references
-                })
+                for quiz in module.quizzes:
+                    all_quizzes.append({
+                        "moduleId": module_id,
+                        "courseId": course_id,
+                        "title": quiz.title,
+                        "description": quiz.description,
+                        "settings": {
+                            "timeLimit": quiz.time_limit_minutes,
+                            "attempts": quiz.attempts_allowed,
+                            "passingGrade": quiz.passing_grade_pct
+                        },
+                        "questions": [self._question_to_dict(q) for q in quiz.questions],
+                        "status": quiz.status.value,
+                        "order": quiz.order,
+                        "canvasId": quiz.canvas_id
+                    })
+
+                for assign in module.assignments:
+                    all_assignments.append({
+                        "moduleId": module_id,
+                        "courseId": course_id,
+                        "title": assign.title,
+                        "description": assign.description,
+                        "points": assign.points_possible,
+                        "dueAt": assign.due_at,
+                        "submissionTypes": [t.value for t in assign.submission_types],
+                        "status": assign.status.value,
+                        "order": assign.order,
+                        "canvasId": assign.canvas_id
+                    })
+
+            # Batch insert sub-items
+            if all_lessons:
+                self.col_lessons.insert_many(all_lessons)
             
-            # Create course document
-            course_title = tutor_course_data.get('title', 'Imported Course')
-            course_document = {
-                '_id': course_id,
-                'title': course_title,
-                'courseUrl': self.slugify(course_title),
-                'description': tutor_course_data.get('description', 'Imported Course Content'),
-                'featuredImage': 'https://placehold.co/600x400?text=Course+Image',
-                'introVideo': '',
-                'authorId': author_id,
-                'authorName': 'Admin',
-                'pricingModel': 'Free',
-                'price': 0,
-                'categories': ['Imported'],
-                'difficultyLevel': 'All Levels',
-                'curriculum': course_curriculum_structure,
-                'isPublic': True,
-                'isDraft': False,
-                'createdAt': datetime.utcnow(),
-                'updatedAt': datetime.utcnow(),
-            }
-            
-            return {
-                'course_document': course_document,
-                'curriculum_items': all_curriculum_items
-            }
-            
-        except Exception as e:
-            print(f"[FAIL] Data transformation failed: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def upload_course(self, course_json_path: Path) -> bool:
-        """
-        Upload course from JSON file to MongoDB.
-        
-        Args:
-            course_json_path: Path to tutor_course.json file
-            
-        Returns:
-            True if upload successful, False otherwise
-        """
-        try:
-            # Load JSON file
-            print(f"[READ] Reading course data from {course_json_path}...")
-            with open(course_json_path, 'r', encoding='utf-8') as f:
-                course_data = json.load(f)
-            
-            # Transform data
-            print("[TRANS] Transforming data to MongoDB schema...")
-            transformed = self.transform_course_data(course_data)
-            
-            if not transformed:
-                print("[FAIL] Data transformation failed.")
-                return False
-            
-            course_document = transformed['course_document']
-            curriculum_items = transformed['curriculum_items']
-            
-            # Insert curriculum items
-            print(f"[UPLOAD] Inserting {len(curriculum_items)} curriculum items...")
-            curriculum_collection = self.db[self.config.curriculum_collection]
-            
-            if curriculum_items:
-                result = curriculum_collection.insert_many(curriculum_items)
-                print(f"[DONE] Inserted {len(result.inserted_ids)} curriculum items successfully.")
-            else:
-                print("[WARN] No curriculum items to insert.")
-            
-            # Insert course document
-            print(f"[UPLOAD] Creating course: \"{course_document['title']}\"...")
-            course_collection = self.db[self.config.course_collection]
-            course_collection.insert_one(course_document)
-            print("[DONE] Course document created successfully.")
-            
-            print("\n[SUCCESS] Upload complete!")
-            print(f"   Course ID: {course_document['_id']}")
-            print(f"   Course URL: {course_document['courseUrl']}")
-            print(f"   Total Items: {len(curriculum_items)}")
+            if all_quizzes:
+                self.col_quizzes.insert_many(all_quizzes)
+                
+            if all_assignments:
+                self.col_assignments.insert_many(all_assignments)
+
+            logger.info("Successfully wrote course items to MongoDB", extra={
+                "course_id": str(course_id),
+                "modules": len(course.modules),
+                "lessons": len(all_lessons),
+                "quizzes": len(all_quizzes),
+                "assignments": len(all_assignments)
+            })
             
             return True
-            
+
         except Exception as e:
-            print(f"[FAIL] Upload failed: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            logger.error("Failed to write to MongoDB", extra={"error": str(e), "task_id": task_id})
             return False
 
+    def _question_to_dict(self, q) -> Dict[str, Any]:
+        """Convert LmsQuestion model to dict for MongoDB embedding."""
+        return {
+            "title": q.title,
+            "text": q.text,
+            "type": q.question_type.value,
+            "points": q.points,
+            "order": q.order,
+            "canvasId": q.canvas_id,
+            "answers": [
+                {
+                    "text": a.text,
+                    "isCorrect": a.is_correct,
+                    "order": a.order,
+                    "feedback": a.feedback,
+                    "matchText": a.match_text
+                } for a in q.answers
+            ],
+            "feedback": {
+                "correct": q.correct_feedback,
+                "incorrect": q.incorrect_feedback,
+                "general": q.general_feedback
+            }
+        }
 
-def upload_to_mongodb(course_json_path: Path, env_file: Optional[Path] = None) -> bool:
+    # -----------------------------------------------------------------------
+    # Job Management
+    # -----------------------------------------------------------------------
+
+    def create_job(self, task_id: str, s3_key: Optional[str] = None):
+        """Initialize a migration job record."""
+        job = {
+            "_id": task_id,
+            "status": "processing",
+            "s3Key": s3_key,
+            "startedAt": datetime.utcnow(),
+            "logs": [],
+            "progress": 0
+        }
+        self.col_jobs.update_one({"_id": task_id}, {"$set": job}, upsert=True)
+
+    def update_job_status(self, task_id: str, status: str, log_msg: Optional[str] = None, progress: Optional[int] = None):
+        """Update existing job status, log, and progress."""
+        update: Dict[str, Any] = {"$set": {"status": status}}
+        if progress is not None:
+            update["$set"]["progress"] = progress
+            
+        if log_msg:
+            # Append log with timestamp
+            log_entry = f"[{datetime.utcnow().isoformat()}] {log_msg}"
+            update["$push"] = {"logs": log_entry}
+        
+        if status in ("completed", "failed"):
+            update["$set"]["completedAt"] = datetime.utcnow()
+
+        self.col_jobs.update_one({"_id": task_id}, update)
+
+    def get_job(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve job record."""
+        return self.col_jobs.find_one({"_id": task_id})
+
+
+def upload_to_mongodb(course: LmsCourse, task_id: str) -> bool:
     """
-    Convenience function to upload a course to MongoDB.
-    
-    Args:
-        course_json_path: Path to tutor_course.json file
-        env_file: Optional path to .env file
-        
-    Returns:
-        True if upload successful, False otherwise
+    Convenience wrapper for the pipeline orchestrator.
     """
-    # Load configuration
-    config = MongoDBConfig(env_file)
-    
-    # Create uploader
-    uploader = MongoDBUploader(config)
-    
-    try:
-        # Connect to MongoDB
-        if not uploader.connect():
-            return False
-        
-        # Upload course
-        success = uploader.upload_course(course_json_path)
-        
-        return success
-        
-    finally:
-        # Always disconnect
-        uploader.disconnect()
+    uploader = MongoDBUploader()
+    return uploader.write_lms_course(course, task_id)

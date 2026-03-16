@@ -1,129 +1,201 @@
+"""
+Migration Service - Orchestrates migration tasks.
+
+Handles background processing of course migrations from various sources.
+Now uses MongoDB for persistent job state and a cleaner pipeline integration.
+"""
+
 import os
 import shutil
-import zipfile
-from pathlib import Path
-from fastapi import UploadFile
+import uuid
 import tempfile
-import time
+from pathlib import Path
+from datetime import datetime
 from typing import Dict, Any, Optional
+from fastapi import UploadFile
 
-from Canvas_Converter import MigrationPipeline
-from src.models.migration_report import ReportStatus
+from ..Canvas_Converter import MigrationPipeline
+from ..exporters.mongodb_uploader import MongoDBUploader
+from ..observability.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 class MigrationService:
+    """
+    Service for managing migration tasks with MongoDB-backed state.
+    """
+    
     def __init__(self):
         self.storage_dir = Path(os.getenv("STORAGE_DIR", "storage"))
         self.uploads_dir = self.storage_dir / "uploads"
         self.outputs_dir = self.storage_dir / "outputs"
+        self.db_uploader = MongoDBUploader()
         
         # Ensure directories exist
         self.uploads_dir.mkdir(parents=True, exist_ok=True)
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Tasks in-memory for this simple implementation
-        # (In production, this would be in MongoDB)
-        self.tasks: Dict[str, Dict[str, Any]] = {}
 
-    def get_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
-        return self.tasks.get(task_id)
+    def get_task_status(self, task_id: str) -> Dict[str, Any]:
+        """Retrieve task status from MongoDB."""
+        job = self.db_uploader.get_job(task_id)
+        if not job:
+            return {"task_id": task_id, "status": "not_found", "message": "Task ID not found in database"}
+        
+        # Standardize response format for the frontend
+        return {
+            "task_id": task_id,
+            "status": job.get("status"),
+            "progress": job.get("progress", 0),
+            "started_at": job.get("startedAt"),
+            "completed_at": job.get("completedAt"),
+            "message": job.get("logs")[-1] if job.get("logs") else "Processing...",
+            "logs": job.get("logs", [])
+        }
 
     async def process_migration(self, task_id: str, file: UploadFile):
         """
-        Background task to process the migration.
+        Background task to process a migration from an uploaded ZIP file.
         """
-        import time
-        self.tasks[task_id] = {
-            "status": "processing",
-            "progress": 0,
-            "message": "Initializing...",
-            "current_step": "extracting",
-            "steps": [
-                {"id": "extracting", "label": "Extracting Files", "status": "pending"},
-                {"id": "validating", "label": "Validating Structure", "status": "pending"},
-                {"id": "parsing", "label": "Parsing Content", "status": "pending"},
-                {"id": "transforming", "label": "Transforming Data", "status": "pending"},
-                {"id": "exporting", "label": "Exporting JSON", "status": "pending"},
-                {"id": "finalizing", "label": "Finalizing Reports", "status": "pending"}
-            ],
-            "started_at": os.times()[4]
-        }
-
-        def on_pipeline_progress(step_id, progress, message):
-            self.tasks[task_id]["message"] = message
-            self.tasks[task_id]["progress"] = progress
-            self.tasks[task_id]["current_step"] = step_id
-            
-            # Update step statuses
-            found_current = False
-            for step in self.tasks[task_id]["steps"]:
-                if step["id"] == step_id:
-                    step["status"] = "active"
-                    found_current = True
-                elif not found_current:
-                    step["status"] = "completed"
-                else:
-                    step["status"] = "pending"
-            
-            # Artificial delay for visual feedback of stage-by-stage progress
-            time.sleep(0.8)
-        
-        temp_dir = Path(tempfile.mkdtemp(prefix=f"migration_{task_id}_"))
+        extract_dir = Path(tempfile.mkdtemp(prefix=f"migration_{task_id}_"))
+        zip_path = self.uploads_dir / f"{task_id}.zip"
         
         try:
-            # 1. Save uploaded ZIP
-            self.tasks[task_id]["message"] = "Saving ZIP file..."
-            zip_path = self.uploads_dir / f"{task_id}.zip"
+            logger.info("Initializing migration job", extra={"task_id": task_id})
+            self.db_uploader.create_job(task_id, s3_key=None)
+            
+            # Step 1: Save uploaded file
+            self._update_progress(task_id, "processing", "Saving uploaded file...", 2)
             with open(zip_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
             
-            # 2. Extract ZIP
-            on_pipeline_progress("extracting", 5, "Extracting ZIP contents...")
-            extract_dir = temp_dir / "source"
-            extract_dir.mkdir(parents=True, exist_ok=True)
-            
+            # Step 2: Extraction
+            self._update_progress(task_id, "processing", "Extracting package...", 5)
+            import zipfile
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(extract_dir)
             
-            # 3. Initialize Pipeline
+            # Step 3: Run Pipeline
             output_dir = self.outputs_dir / task_id
-            pipeline = MigrationPipeline(extract_dir, output_dir, on_progress=on_pipeline_progress)
+            pipeline = MigrationPipeline(
+                course_directory=extract_dir,
+                output_directory=output_dir,
+                on_progress=self._get_progress_callback(task_id)
+            )
             
-            # 4. Run Pipeline
+            # The pipeline now handles transform -> asset upload -> DB write
             report = pipeline.run()
             
-            # 5. Finalize Task Status
-            is_success = report.status == ReportStatus.SUCCESS
-            self.tasks[task_id]["status"] = "completed" if is_success else "failed"
-            self.tasks[task_id]["message"] = "Migration finished."
-            
-            # Mark all steps as completed if overall success
-            if is_success:
-                for step in self.tasks[task_id]["steps"]:
-                    step["status"] = "completed"
-            
-            self.tasks[task_id]["report"] = {
-                "status": report.status.value,
-                "course": report.source_course_title,
-                "output_path": str(output_dir),
-                "summary": report.get_summary_dict(),
-                "source_counts": report.source_content_counts,
-                "counts": report.migrated_content_counts,
-                "total_errors": report.total_errors,
-                "total_warnings": report.total_warnings,
-                "execution_time": round(report.execution_time_seconds, 2)
-            }
-            
+            if report and report.status.value == "success":
+                self._update_progress(task_id, "completed", "Migration successful", 100)
+                logger.info("Migration job completed successfully", extra={"task_id": task_id})
+            else:
+                self._update_progress(task_id, "failed", "Pipeline execution failed", 100)
+                logger.error("Migration pipeline failed", extra={"task_id": task_id})
+
         except Exception as e:
-            self.tasks[task_id]["status"] = "failed"
-            self.tasks[task_id]["message"] = f"Error: {str(e)}"
-            # Mark current step as failed
-            current_step = self.tasks[task_id].get("current_step")
-            for step in self.tasks[task_id]["steps"]:
-                if step["id"] == current_step:
-                    step["status"] = "failed"
+            logger.error("Critical failure during migration", extra={"task_id": task_id, "error": str(e)})
+            self._update_progress(task_id, "failed", f"Critical error: {str(e)}", 100)
         
         finally:
-            # Cleanup temp source files (we keep the output in storage)
-            if temp_dir.exists():
-                shutil.rmtree(temp_dir)
-            # We can also delete the zip_path if needed
+            # Cleanup
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir)
+            if zip_path.exists():
+                zip_path.unlink()
+
+    async def process_migration_from_s3(self, task_id: str, s3_key: str, bucket: Optional[str] = None):
+        """
+        Background task to download from S3 and migrate.
+        """
+        from ..utils.s3_utils import S3Downloader
+        
+        self.db_uploader.create_job(task_id, s3_key=s3_key)
+        zip_path = self.uploads_dir / f"{task_id}.zip"
+        extract_dir = Path(tempfile.mkdtemp(prefix=f"migration_s3_{task_id}_"))
+        
+        try:
+            self._update_progress(task_id, "processing", f"Downloading from S3: {s3_key}", 5)
+            
+            downloader = S3Downloader(bucket_name=bucket)
+            if downloader.download(s3_key, zip_path):
+                # Extraction
+                self._update_progress(task_id, "processing", "Extracting package...", 10)
+                import zipfile
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(extract_dir)
+
+                # Pipeline
+                output_dir = self.outputs_dir / task_id
+                pipeline = MigrationPipeline(
+                    course_directory=extract_dir,
+                    output_directory=output_dir,
+                    on_progress=self._get_progress_callback(task_id)
+                )
+                report = pipeline.run()
+                
+                if report and report.status.value == "success":
+                    self._update_progress(task_id, "completed", "Migration successful", 100)
+                else:
+                    self._update_progress(task_id, "failed", "Pipeline execution failed", 100)
+            else:
+                self._update_progress(task_id, "failed", "S3 download failed", 100)
+                
+        except Exception as e:
+            logger.error("S3 migration failed", extra={"task_id": task_id, "error": str(e)})
+            self._update_progress(task_id, "failed", str(e), 100)
+        finally:
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir)
+            if zip_path.exists():
+                zip_path.unlink()
+
+    async def process_hierarchical_migration(self, task_id: str, course_id: str):
+        """
+        Resolve S3 path via metadata and migrate.
+        """
+        from ..utils.dynamodb_utils import MetadataProvider
+        from ..utils.s3_utils import S3Downloader
+        
+        self.db_uploader.create_job(task_id)
+        
+        try:
+            self._update_progress(task_id, "processing", "Resolving course metadata...", 5)
+            
+            meta_provider = MetadataProvider()
+            meta = meta_provider.get_course_metadata(course_id)
+            if not meta:
+                raise ValueError(f"Metadata not found for course {course_id}")
+            
+            university = meta.get('university_id')
+            program = meta.get('program_id')
+            course_code = meta.get('course_code')
+
+            if not all([university, program, course_code]):
+                 raise ValueError(f"Incomplete metadata for course {course_id}")
+
+            # Construct S3 key
+            downloader = S3Downloader()
+            s3_key = downloader.construct_hierarchical_key(university, program, course_code)
+            
+            logger.info("Resolved hierarchical S3 key", extra={"task_id": task_id, "s3_key": s3_key})
+            
+            # Delegate to S3 processor
+            await self.process_migration_from_s3(task_id, s3_key)
+
+        except Exception as e:
+            logger.error("Hierarchical migration failed", extra={"task_id": task_id, "error": str(e)})
+            self._update_progress(task_id, "failed", str(e), 100)
+
+    def _update_progress(self, task_id: str, status: str, message: str, progress: int):
+        """Helper to update DB and log consistently."""
+        self.db_uploader.update_job_status(task_id, status, log_msg=message, progress=progress)
+        logger.debug(f"Task {task_id} update: {message} ({progress}%)")
+
+    def _get_progress_callback(self, task_id: str):
+        """Returns a callback function for the MigrationPipeline."""
+        def callback(stage: str, progress: int, message: str):
+            # Scale pipeline progress (0-100) into overall job progress (10-95)
+            overall_pct = 10 + int(progress * 0.85)
+            self._update_progress(task_id, "processing", f"[{stage}] {message}", overall_pct)
+        return callback

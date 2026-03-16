@@ -162,24 +162,23 @@ class ResolutionReport:
 @dataclass
 class TransformationReport:
     """
-    Report from Stage 4: Tutor LMS Transformation
+    Report from Stage 3: LMS Transformation
     """
     timestamp: datetime = field(default_factory=datetime.now)
     
-    # Transformation counts
+    # Transformation counts (Native LMS)
+    modules_created: int = 0
     lessons_created: int = 0
     quizzes_created: int = 0
     assignments_created: int = 0
     questions_created: int = 0
-    topics_created: int = 0
     
     # Question type mappings
     question_type_mappings: Dict[str, int] = field(default_factory=dict)
-    # e.g., {"multiple_choice": 50, "essay": 10, "true_false": 20}
     
-    # Unsupported features
-    unsupported_question_types: List[str] = field(default_factory=list)
-    unsupported_features: List[str] = field(default_factory=list)
+    # Asset info
+    assets_identified: int = 0
+    assets_uploaded: int = 0
     
     # Errors
     errors: List[MigrationError] = field(default_factory=list)

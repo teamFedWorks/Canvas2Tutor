@@ -24,6 +24,9 @@ from ..utils.xml_utils import (
     get_element_text,
     get_element_attribute
 )
+from ..observability.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class ManifestParser:
@@ -220,7 +223,7 @@ class ManifestParser:
             
             if children:
                 # Use the children as the top-level modules
-                print("  Detected wrapper module, flattening structure...")
+                logger.debug("Detected wrapper module, flattening structure...")
                 items = children
         
         for position, item_elem in enumerate(items):

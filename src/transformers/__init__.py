@@ -1,7 +1,5 @@
 """
-Transformers - Convert Canvas entities to Tutor LMS entities
+Transformers Package
 """
 
 from .course_transformer import CourseTransformer
-
-__all__ = ['CourseTransformer']

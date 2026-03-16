@@ -24,7 +24,7 @@ COPY . .
 RUN mkdir -p /app/storage/uploads /app/storage/outputs
 
 # Expose the API port
-EXPOSE 8000
+EXPOSE 5008
 
 # Set environment variables
 ENV PYTHONPATH=/app
@@ -33,4 +33,4 @@ ENV MONGODB_URI=mongodb://mongodb:27017
 ENV MONGODB_DATABASE=nextgen_lms
 
 # Start the FastAPI application
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "5008"]
