@@ -1,7 +1,8 @@
 import os
 import json
 import sys
-from typing import Dict, Any
+import datetime
+from typing import Dict, Any, Optional
 from pymongo import MongoClient
 import bson
 from ..utils.logger import get_logger
@@ -12,6 +13,7 @@ logger = get_logger(__name__)
 class MongoDBExporter:
     """
     Exports the transformed course document to MongoDB with size validation and retries.
+    Handles dynamic program creation and logical deduplication.
     """
 
     MAX_BSON_SIZE = 15.5 * 1024 * 1024  # 15.5MB (safe margin below 16MB)
@@ -28,6 +30,45 @@ class MongoDBExporter:
             self._db = self._client[self.db_name]
 
     @retry(max_attempts=3, base_delay=1)
+    def get_or_create_program(self, university_id: str, program_title: str) -> str:
+        """
+        Finds or creates a program within a university.
+        """
+        self._ensure_connection()
+        programs_col = self._db['programs']
+        
+        program = programs_col.find_one({
+            "universityId": university_id,
+            "title": program_title
+        })
+
+        if program:
+            return str(program["_id"])
+
+        # Create new program if not found
+        new_program = {
+            "title": program_title,
+            "universityId": university_id,
+            "created_at": datetime.datetime.utcnow(),
+            "status": "active"
+        }
+        result = programs_col.insert_one(new_program)
+        logger.log("INFO", "Dynamic program created", title=program_title, university_id=university_id)
+        return str(result.inserted_id)
+
+    def check_logical_duplicate(self, university_id: str, program_id: str, title: str) -> Optional[str]:
+        """
+        Checks if a course with the same title already exists in the same context.
+        """
+        self._ensure_connection()
+        course = self._db['courses'].find_one({
+            "universityId": university_id,
+            "programId": program_id,
+            "title": title
+        })
+        return str(course["_id"]) if course else None
+
+    @retry(max_attempts=3, base_delay=1)
     def export(self, course_data: Dict[str, Any]) -> str:
         """
         Inserts the course document into the 'courses' collection with retry and size check.
@@ -36,19 +77,14 @@ class MongoDBExporter:
         collection = self._db['courses']
 
         # 1. Size Validation
-        # Estimates BSON size before inserting
         serialized = bson.BSON.encode(course_data)
         size_bytes = len(serialized)
         
-        logger.log("INFO", "Validating document size", 
-                   title=course_data.get('title'), 
-                   size_bytes=size_bytes)
-
         if size_bytes > self.MAX_BSON_SIZE:
             logger.log("ERROR", "Document exceeds MongoDB size limit", 
                        title=course_data.get('title'), 
                        size_mb=size_bytes/(1024*1024))
-            raise ValueError(f"Course document too large ({size_bytes} bytes). Ingestion aborted.")
+            raise ValueError(f"Course document too large ({size_bytes} bytes).")
 
         # 2. Export
         result = collection.insert_one(course_data)
@@ -59,22 +95,11 @@ class MongoDBExporter:
                    
         return str(result.inserted_id)
 
-    def close(self):
-        if self._client:
-            self._client.close()
-            self._client = None
-
     def find_by_checksum(self, checksum: str) -> Optional[Dict[str, Any]]:
-        """
-        Used for idempotency check.
-        """
         self._ensure_connection()
         return self._db['migration_jobs'].find_one({"package_checksum": checksum})
 
     def track_job(self, task_id: str, checksum: str, status: str, course_id: str = None):
-        """
-        Tracks migration jobs for idempotency and status monitoring.
-        """
         self._ensure_connection()
         self._db['migration_jobs'].update_one(
             {"task_id": task_id},
@@ -83,9 +108,14 @@ class MongoDBExporter:
                     "package_checksum": checksum,
                     "status": status,
                     "course_id": course_id,
-                    "updated_at": bson.datetime.datetime.utcnow()
+                    "updated_at": datetime.datetime.utcnow()
                 },
-                "$setOnInsert": {"created_at": bson.datetime.datetime.utcnow()}
+                "$setOnInsert": {"created_at": datetime.datetime.utcnow()}
             },
             upsert=True
         )
+
+    def close(self):
+        if self._client:
+            self._client.close()
+            self._client = None

@@ -5,7 +5,7 @@ class CourseTransformer:
     Transforms parsed Canvas data into the MERN LMS MongoDB schema.
     """
 
-    def transform(self, parsed_data: Dict[str, Any], university_id: str, author_id: str) -> Dict[str, Any]:
+    def transform(self, parsed_data: Dict[str, Any], university_id: str, program_id: str, author_id: str) -> Dict[str, Any]:
         """
         Maps intermediate representation to the final schema.
         """
@@ -13,6 +13,7 @@ class CourseTransformer:
             "title": parsed_data.get("title", "Untitled Course"),
             "description": parsed_data.get("description", ""),
             "universityId": university_id,
+            "programId": program_id,
             "authorId": author_id,
             "curriculum": []
         }
