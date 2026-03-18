@@ -17,20 +17,20 @@ from datetime import datetime
 
 class LmsStatus(Enum):
     """Content publication status."""
-    PUBLISHED = "published"
-    DRAFT = "draft"
-    ARCHIVED = "archived"
+    PUBLISHED = "Published"
+    DRAFT = "Draft"
+    ARCHIVED = "Archived"
 
 
 class LmsQuestionType(Enum):
     """Supported LMS question types."""
-    MULTIPLE_CHOICE = "multiple_choice"
-    TRUE_FALSE = "true_false"
-    SHORT_ANSWER = "short_answer"
-    ESSAY = "essay"
-    FILL_IN_BLANK = "fill_in_blank"
-    MATCHING = "matching"
-    ORDERING = "ordering"
+    MULTIPLE_CHOICE = "Multiple Choice"
+    TRUE_FALSE = "True/False"
+    SHORT_ANSWER = "Short Answer"
+    ESSAY = "Open Ended/Essay"
+    FILL_IN_BLANK = "Fill in Blanks"
+    MATCHING = "Matching"
+    ORDERING = "Ordering"
 
 
 class LmsSubmissionType(Enum):
@@ -209,16 +209,19 @@ class LmsCourse:
     title: str
     description: str = ""
     status: LmsStatus = LmsStatus.PUBLISHED
-
-    # Instructor / author reference (ObjectId string from your Node.js user service)
-    instructor_id: Optional[str] = None
-
+    
+    # 🟢 TENANCY & BACKEND ALIGNMENT
+    university: Optional[str] = None       # ObjectId string
+    author_id: Optional[str] = None        # Maps to authorId in backend
+    course_code: Optional[str] = None      # e.g., "CS101"
+    slug: Optional[str] = None
+    
     # Hierarchy
     modules: List[LmsModule] = field(default_factory=list)
 
     # Metadata
     image_url: Optional[str] = None
-    difficulty_level: str = "all_levels"   # beginner, intermediate, advanced, all_levels
+    difficulty_level: str = "All Levels"   # Beginner, Intermediate, Advanced, All Levels
     categories: List[str] = field(default_factory=list)
 
     # Timestamps

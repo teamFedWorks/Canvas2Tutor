@@ -53,7 +53,14 @@ class MigrationService:
             "logs": job.get("logs", [])
         }
 
-    async def process_migration(self, task_id: str, file: UploadFile):
+    async def process_migration(
+        self, 
+        task_id: str, 
+        file: UploadFile,
+        university_id: Optional[str] = None,
+        author_id: Optional[str] = None,
+        course_code: Optional[str] = None
+    ):
         """
         Background task to process a migration from an uploaded ZIP file.
         """
@@ -80,7 +87,11 @@ class MigrationService:
             pipeline = MigrationPipeline(
                 course_directory=extract_dir,
                 output_directory=output_dir,
-                on_progress=self._get_progress_callback(task_id)
+                on_progress=self._get_progress_callback(task_id),
+                university_id=university_id,
+                author_id=author_id,
+                course_code=course_code,
+                task_id=task_id
             )
             
             # The pipeline now handles transform -> asset upload -> DB write
@@ -104,7 +115,15 @@ class MigrationService:
             if zip_path.exists():
                 zip_path.unlink()
 
-    async def process_migration_from_s3(self, task_id: str, s3_key: str, bucket: Optional[str] = None):
+    async def process_migration_from_s3(
+        self, 
+        task_id: str, 
+        s3_key: str, 
+        bucket: Optional[str] = None,
+        university_id: Optional[str] = None,
+        author_id: Optional[str] = None,
+        course_code: Optional[str] = None
+    ):
         """
         Background task to download from S3 and migrate.
         """
@@ -130,7 +149,11 @@ class MigrationService:
                 pipeline = MigrationPipeline(
                     course_directory=extract_dir,
                     output_directory=output_dir,
-                    on_progress=self._get_progress_callback(task_id)
+                    on_progress=self._get_progress_callback(task_id),
+                    university_id=university_id,
+                    author_id=author_id,
+                    course_code=course_code,
+                    task_id=task_id
                 )
                 report = pipeline.run()
                 
@@ -167,21 +190,28 @@ class MigrationService:
             if not meta:
                 raise ValueError(f"Metadata not found for course {course_id}")
             
-            university = meta.get('university_id')
-            program = meta.get('program_id')
+            university_id = meta.get('university_id')
+            program_id = meta.get('program_id')
             course_code = meta.get('course_code')
+            author_id = meta.get('author_id')  # Might be None
 
-            if not all([university, program, course_code]):
+            if not all([university_id, program_id, course_code]):
                  raise ValueError(f"Incomplete metadata for course {course_id}")
 
             # Construct S3 key
             downloader = S3Downloader()
-            s3_key = downloader.construct_hierarchical_key(university, program, course_code)
+            s3_key = downloader.construct_hierarchical_key(university_id, program_id, course_code)
             
             logger.info("Resolved hierarchical S3 key", extra={"task_id": task_id, "s3_key": s3_key})
             
-            # Delegate to S3 processor
-            await self.process_migration_from_s3(task_id, s3_key)
+            # Delegate to S3 processor with metadata
+            await self.process_migration_from_s3(
+                task_id, 
+                s3_key, 
+                university_id=university_id,
+                author_id=author_id,
+                course_code=course_code
+            )
 
         except Exception as e:
             logger.error("Hierarchical migration failed", extra={"task_id": task_id, "error": str(e)})
