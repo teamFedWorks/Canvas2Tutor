@@ -28,37 +28,32 @@ class IngestionWorker:
         self.validator = PackageValidator()
         self.exporter = MongoDBExporter()
 
-    def process_package(self, zip_path: Path, university_id: str, author_id: str, title_override: Optional[str] = None) -> Dict[str, Any]:
+    def process_package(self, zip_path: Path, university_id: str, author_id: str, program_name: str = None, title_override: Optional[str] = None) -> Dict[str, Any]:
         """
-        Runs the pipeline for a single course package with full hardening.
+        Runs the pipeline for a single course package with full hardening and intelligent onboarding.
         """
         task_id = str(uuid.uuid4())
-        logger.log("INFO", "Starting ingestion task", 
+        logger.log("INFO", "Starting intelligent ingestion task", 
                    task_id=task_id, 
                    filename=zip_path.name)
         
-        # 1. Idempotency Check (Checksum)
+        # 1. Idempotency Check (Package Checksum)
         checksum = self.validator.calculate_checksum(zip_path)
         existing_job = self.exporter.find_by_checksum(checksum)
         
         if existing_job and existing_job.get('status') == 'completed':
-            logger.log("INFO", "Duplicate package detected, skipping ingestion", 
-                       checksum=checksum, 
-                       course_id=existing_job.get('course_id'))
             return {
                 "status": "success", 
                 "course_id": existing_job.get('course_id'), 
-                "message": "Duplicate package already imported.",
+                "message": "This file was already imported.",
                 "reused": True
             }
 
-        # Track job start
         self.exporter.track_job(task_id, checksum, "processing")
 
         # 2. Security Validation
         is_valid, msg = self.validator.validate_zip(zip_path)
         if not is_valid:
-            logger.log("ERROR", "Validation failed", task_id=task_id, error=msg)
             self.exporter.track_job(task_id, checksum, "failed")
             return {"status": "failed", "error": msg}
 
@@ -68,52 +63,61 @@ class IngestionWorker:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(extract_dir)
 
-            # 4. Detect Format
+            # 4. Detect Format & Parse
             fmt = FormatDetector.detect(extract_dir)
             if fmt == ExportFormat.UNKNOWN:
-                logger.log("ERROR", "Unknown format", task_id=task_id)
                 self.exporter.track_job(task_id, checksum, "failed")
-                return {"status": "failed", "error": "Unknown export format."}
+                return {"status": "failed", "error": "Unknown format."}
 
-            logger.log("INFO", "Format detected", task_id=task_id, format=fmt.value)
-
-            # 5. Parse
-            if fmt == ExportFormat.IMSCC:
-                parser = IMSCCParser(extract_dir)
-            else:
-                parser = CanvasExportParser(extract_dir)
-            
+            parser = IMSCCParser(extract_dir) if fmt == ExportFormat.IMSCC else CanvasExportParser(extract_dir)
             parsed_data = parser.parse()
+            
             if "error" in parsed_data:
-                logger.log("ERROR", "Parsing failed", task_id=task_id, error=parsed_data["error"])
                 self.exporter.track_job(task_id, checksum, "failed")
                 return {"status": "failed", "error": parsed_data["error"]}
 
-            # 6. Transform
-            transformer = CourseTransformer()
-            if title_override:
-                parsed_data["title"] = title_override
-            transformed_course = transformer.transform(parsed_data, university_id, author_id)
+            # 5. Intelligent Program Discovery
+            # Use provided program_name or derive it (e.g., from filename or fallback)
+            final_program_name = program_name or self._discover_program_name(zip_path, parsed_data)
+            program_id = self.exporter.get_or_create_program(university_id, final_program_name)
 
-            # 7. Process Assets (Parallel S3 + Rewrite)
-            logger.log("INFO", "Processing assets", task_id=task_id)
+            # 6. Logical Deduplication (Title + Program)
+            course_title = parsed_data.get("title", "Untitled Course")
+            if title_override:
+                course_title = title_override
+                parsed_data["title"] = title_override
+
+            existing_course_id = self.exporter.check_logical_duplicate(university_id, program_id, course_title)
+            
+            if existing_course_id:
+                logger.log("INFO", "Course already exists in program", course_id=existing_course_id)
+                self.exporter.track_job(task_id, checksum, "completed", course_id=existing_course_id)
+                return {
+                    "status": "success", 
+                    "course_id": existing_course_id, 
+                    "message": f"Course '{course_title}' already exists in this program.",
+                    "logical_duplicate": True
+                }
+
+            # 7. Transform
+            transformer = CourseTransformer()
+            transformed_course = transformer.transform(parsed_data, university_id, program_id, author_id)
+
+            # 8. Process Assets
             uploader = AssetUploader(extract_dir, self.s3_bucket, self.cdn_url)
             uploader.process_course_assets(transformed_course)
 
-            # 8. Export to MongoDB (with size check and retries)
+            # 9. Export
             course_id = self.exporter.export(transformed_course)
 
             # Mark job complete
             self.exporter.track_job(task_id, checksum, "completed", course_id=course_id)
 
-            logger.log("INFO", "Ingestion completed successfully", 
-                       task_id=task_id, 
-                       course_id=course_id)
-
             return {
                 "status": "success",
                 "course_id": course_id,
-                "title": transformed_course["title"],
+                "course_data": transformed_course, # Return full data for UI editing
+                "program_name": final_program_name,
                 "format": fmt.value,
                 "task_id": task_id
             }
@@ -123,7 +127,18 @@ class IngestionWorker:
             self.exporter.track_job(task_id, checksum, "failed")
             raise e
         finally:
-            # Cleanup temp files
             if extract_dir.exists():
                 shutil.rmtree(extract_dir)
             self.exporter.close()
+
+    def _discover_program_name(self, zip_path: Path, parsed_data: Dict[str, Any]) -> str:
+        """
+        Tries to guess the program name if not provided.
+        """
+        # Strategy A: Check filename prefix (e.g. BSCS_Algo.zip)
+        filename = zip_path.name
+        if "_" in filename:
+            return filename.split("_")[0].upper()
+        
+        # Strategy B: Fallback to a general program
+        return "General Onboarding"

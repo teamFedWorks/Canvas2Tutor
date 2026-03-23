@@ -1,15 +1,14 @@
 """
 MongoDB Uploader - Direct LMS Database Writer
 
-Handles bulk writing of LmsCourse models into five MongoDB collections:
-courses, modules, lessons, quizzes, assignments.
-Also manages the 'migration_jobs' tracking collection.
+Handles writing of LmsCourse models into the 'courses' collection
+using a nested curriculum structure that matches the MERN LMS backend.
 """
 
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 import pymongo
-from pymongo import UpdateOne, ASCENDING
+from pymongo import ASCENDING
 from bson import ObjectId
 
 from ..models.lms_models import LmsCourse, LmsModule, LmsLesson, LmsQuiz, LmsAssignment
@@ -21,7 +20,8 @@ logger = get_logger(__name__)
 
 class MongoDBUploader:
     """
-    Directly writes LMS course data to MongoDB collections.
+    Directly writes LMS course data to the MongoDB 'courses' collection.
+    Matches the nested schema expected by CourseModel.js.
     """
 
     def __init__(self, config: Optional[MongoDBConfig] = None):
@@ -34,10 +34,6 @@ class MongoDBUploader:
         
         # Collections
         self.col_courses = self.db['courses']
-        self.col_modules = self.db['modules']
-        self.col_lessons = self.db['lessons']
-        self.col_quizzes = self.db['quizzes']
-        self.col_assignments = self.db['assignments']
         self.col_jobs = self.db['migration_jobs']
 
         self._ensure_indexes()
@@ -45,12 +41,9 @@ class MongoDBUploader:
     def _ensure_indexes(self):
         """Build essential indexes for performance and uniqueness."""
         try:
-            # course_id used as shard key or lookup key in sub-collections
+            # course_id used as shard key or lookup key
             self.col_courses.create_index([("canvasCourseId", ASCENDING)], unique=True)
-            self.col_modules.create_index([("courseId", ASCENDING), ("order", ASCENDING)])
-            self.col_lessons.create_index([("moduleId", ASCENDING), ("order", ASCENDING)])
-            self.col_quizzes.create_index([("moduleId", ASCENDING), ("order", ASCENDING)])
-            self.col_assignments.create_index([("moduleId", ASCENDING), ("order", ASCENDING)])
+            self.col_courses.create_index([("slug", ASCENDING)], unique=False)
             
             # Job monitoring
             self.col_jobs.create_index([("startedAt", ASCENDING)])
@@ -60,7 +53,7 @@ class MongoDBUploader:
 
     def write_lms_course(self, course: LmsCourse, task_id: str) -> bool:
         """
-        Performs an idempotent bulk write of the entire course structure.
+        Performs an idempotent upsert of the entire course structure.
         """
         logger.info("Writing course to MongoDB", extra={
             "task_id": task_id,
@@ -69,119 +62,110 @@ class MongoDBUploader:
         })
 
         try:
-            # 1. UPSERT the main course document
+            # 1. Prepare nested curriculum
+            curriculum = []
+            for m_index, module in enumerate(course.modules):
+                items = []
+                
+                # Merge lessons, quizzes, assignments into a single 'items' list
+                # Each item needs a 'type' discriminator and a 'slug'
+                
+                for lesson in module.lessons:
+                    items.append({
+                        "title": lesson.title,
+                        "slug": self._slugify(lesson.title),
+                        "type": "Lesson",
+                        "content": lesson.content,
+                        "attachments": [{"name": url.split('/')[-1], "url": url} for url in lesson.asset_urls],
+                        "settings": {
+                            "isPublished": (lesson.status.value == "Published")
+                        }
+                        # Position handled via order if needed, but array order is usually sufficient
+                    })
+                
+                for quiz in module.quizzes:
+                    items.append({
+                        "title": quiz.title,
+                        "slug": self._slugify(quiz.title),
+                        "type": "Quiz",
+                        "quizConfig": {
+                            "timeLimit": quiz.time_limit_minutes or 0,
+                            "attemptsAllowed": quiz.attempts_allowed,
+                            "passingGrade": quiz.passing_grade_pct,
+                            "shuffleQuestions": quiz.shuffle_questions,
+                            "showCorrectAnswers": quiz.show_correct_answers
+                        },
+                        "questions": [self._question_to_dict(q) for q in quiz.questions],
+                        "settings": {
+                            "isPublished": (quiz.status.value == "Published")
+                        }
+                    })
+
+                for assign in module.assignments:
+                    items.append({
+                        "title": assign.title,
+                        "slug": self._slugify(assign.title),
+                        "type": "Assignment",
+                        "instructions": assign.description,
+                        "assignmentConfig": {
+                            "totalPoints": assign.points_possible,
+                            "minPassPoints": assign.passing_points,
+                            "fileUploadLimit": assign.max_file_uploads,
+                            "maxFileSizeMB": assign.max_file_size_mb,
+                            "deadline": assign.due_at.isoformat() if assign.due_at else None
+                        },
+                        "settings": {
+                            "isPublished": (assign.status.value == "Published")
+                        }
+                    })
+
+                # Sort items by their original 'order' if provided, otherwise preserve transformer order
+                # items.sort(key=lambda x: x.get('order', 0))
+
+                curriculum.append({
+                    "title": module.title,
+                    "summary": module.description or "",
+                    "isPublished": True,
+                    "items": items
+                })
+
+            # 2. Build the main course document
             course_doc = {
                 "title": course.title,
                 "description": course.description,
                 "status": course.status.value,
                 "canvasCourseId": course.canvas_course_id,
-                "instructorId": course.instructor_id,
-                "difficulty": course.difficulty_level,
+                "courseCode": course.course_code or "DEFAULT",
+                "slug": course.slug or self._slugify(course.title),
+                "difficultyLevel": course.difficulty_level,
                 "categories": course.categories,
-                "updatedAt": datetime.utcnow()
+                "updatedAt": datetime.utcnow(),
+                "curriculum": curriculum
             }
             
-            result = self.col_courses.update_one(
+            # Handle tenancy IDs (convert to ObjectId if possible)
+            if course.university:
+                try:
+                    course_doc["university"] = ObjectId(course.university)
+                except:
+                    course_doc["university"] = course.university
+            
+            if course.author_id:
+                try:
+                    course_doc["authorId"] = ObjectId(course.author_id)
+                except:
+                    course_doc["authorId"] = course.author_id
+
+            # 3. UPSERT the main course document
+            self.col_courses.update_one(
                 {"canvasCourseId": course.canvas_course_id},
                 {"$set": course_doc, "$setOnInsert": {"createdAt": datetime.utcnow()}},
                 upsert=True
             )
             
-            # Retrieve the course _id (either from existing or new)
-            if result.upserted_id:
-                course_id = result.upserted_id
-            else:
-                existing = self.col_courses.find_one({"canvasCourseId": course.canvas_course_id}, {"_id": 1})
-                if not existing:
-                    # Fallback case if update somehow didn't yield a doc
-                    logger.error("Course document not found after upsert", extra={"canvas_id": course.canvas_course_id})
-                    return False
-                course_id = existing["_id"]
-
-            # 2. CLEAR existing sub-items for this course to ensure clean overwrite
-            # Since we use courseId as a foreign key, we delete all items linked to this courseId
-            # before re-inserting the new versions.
-            self.col_modules.delete_many({"courseId": course_id})
-            self.col_lessons.delete_many({"courseId": course_id})
-            self.col_quizzes.delete_many({"courseId": course_id})
-            self.col_assignments.delete_many({"courseId": course_id})
-            
-            # 3. Process modules and their contents
-            all_lessons = []
-            all_quizzes = []
-            all_assignments = []
-            
-            for m_index, module in enumerate(course.modules):
-                module_id = ObjectId()
-                module_doc = {
-                    "_id": module_id,
-                    "courseId": course_id,
-                    "title": module.title,
-                    "order": module.order or m_index,
-                    "canvasId": module.canvas_id
-                }
-                self.col_modules.insert_one(module_doc)
-
-                # Collect sub-items
-                for lesson in module.lessons:
-                    all_lessons.append({
-                        "moduleId": module_id,
-                        "courseId": course_id,
-                        "title": lesson.title,
-                        "content": lesson.content,
-                        "status": lesson.status.value,
-                        "order": lesson.order,
-                        "assetUrls": lesson.asset_urls,
-                        "canvasId": lesson.canvas_id
-                    })
-                
-                for quiz in module.quizzes:
-                    all_quizzes.append({
-                        "moduleId": module_id,
-                        "courseId": course_id,
-                        "title": quiz.title,
-                        "description": quiz.description,
-                        "settings": {
-                            "timeLimit": quiz.time_limit_minutes,
-                            "attempts": quiz.attempts_allowed,
-                            "passingGrade": quiz.passing_grade_pct
-                        },
-                        "questions": [self._question_to_dict(q) for q in quiz.questions],
-                        "status": quiz.status.value,
-                        "order": quiz.order,
-                        "canvasId": quiz.canvas_id
-                    })
-
-                for assign in module.assignments:
-                    all_assignments.append({
-                        "moduleId": module_id,
-                        "courseId": course_id,
-                        "title": assign.title,
-                        "description": assign.description,
-                        "points": assign.points_possible,
-                        "dueAt": assign.due_at,
-                        "submissionTypes": [t.value for t in assign.submission_types],
-                        "status": assign.status.value,
-                        "order": assign.order,
-                        "canvasId": assign.canvas_id
-                    })
-
-            # Batch insert sub-items
-            if all_lessons:
-                self.col_lessons.insert_many(all_lessons)
-            
-            if all_quizzes:
-                self.col_quizzes.insert_many(all_quizzes)
-                
-            if all_assignments:
-                self.col_assignments.insert_many(all_assignments)
-
-            logger.info("Successfully wrote course items to MongoDB", extra={
-                "course_id": str(course_id),
-                "modules": len(course.modules),
-                "lessons": len(all_lessons),
-                "quizzes": len(all_quizzes),
-                "assignments": len(all_assignments)
+            logger.info("Successfully upserted nested course to MongoDB", extra={
+                "title": course.title,
+                "modules": len(course.modules)
             })
             
             return True
@@ -194,26 +178,24 @@ class MongoDBUploader:
         """Convert LmsQuestion model to dict for MongoDB embedding."""
         return {
             "title": q.title,
-            "text": q.text,
             "type": q.question_type.value,
             "points": q.points,
-            "order": q.order,
-            "canvasId": q.canvas_id,
-            "answers": [
+            "explanation": q.general_feedback,
+            "options": [
                 {
                     "text": a.text,
                     "isCorrect": a.is_correct,
-                    "order": a.order,
-                    "feedback": a.feedback,
-                    "matchText": a.match_text
+                    "feedback": a.feedback
                 } for a in q.answers
-            ],
-            "feedback": {
-                "correct": q.correct_feedback,
-                "incorrect": q.incorrect_feedback,
-                "general": q.general_feedback
-            }
+            ]
         }
+
+    def _slugify(self, text: str) -> str:
+        """Fallback slug generator for DB write."""
+        import re
+        text = text.lower()
+        text = re.sub(r'[^\w\s-]', '', text)
+        return re.sub(r'[-\s]+', '-', text).strip('-')
 
     # -----------------------------------------------------------------------
     # Job Management

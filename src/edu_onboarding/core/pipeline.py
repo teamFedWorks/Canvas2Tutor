@@ -25,7 +25,16 @@ class MigrationPipeline:
     Orchestrates the Canvas → Custom LMS migration flow.
     """
     
-    def __init__(self, course_directory: Path, university_id: str, author_id: str, output_directory: Optional[Path] = None, on_progress=None):
+    def __init__(
+        self, 
+        course_directory: Path, 
+        output_directory: Optional[Path] = None, 
+        on_progress=None,
+        university_id: Optional[str] = None,
+        author_id: Optional[str] = None,
+        course_code: Optional[str] = None,
+        task_id: Optional[str] = None
+    ):
         """
         Initialize the migration pipeline.
         """
@@ -35,6 +44,11 @@ class MigrationPipeline:
         self.on_progress = on_progress
         self.output_directory = Path(output_directory) if output_directory else self.course_directory / "lms_output"
         self.output_directory.mkdir(parents=True, exist_ok=True)
+        
+        self.university_id = university_id
+        self.author_id = author_id
+        self.course_code = course_code
+        self.task_id = task_id or f"internal_{int(time.time())}"
         
         self.report = MigrationReport(
             status=ReportStatus.SUCCESS,
@@ -79,9 +93,10 @@ class MigrationPipeline:
             self._notify("transforming", 50, "Transforming to LMS models...")
             transformer = CourseTransformer()
             lms_course, transformation_report = transformer.transform(
-                canvas_course, 
-                self.university_id, 
-                self.author_id
+                canvas_course,
+                university_id=self.university_id,
+                author_id=self.author_id,
+                course_code=self.course_code
             )
             self.report.transformation_report = transformation_report
             
@@ -102,10 +117,8 @@ class MigrationPipeline:
             # Stage 5: Database Write
             self._notify("exporting", 90, "Writing to MongoDB...")
             db_writer = MongoDBUploader()
-            # We use an internal ID for the task if not provided by service
-            task_id = getattr(self, "task_id", f"internal_{int(time.time())}")
             
-            success = db_writer.write_lms_course(lms_course, task_id)
+            success = db_writer.write_lms_course(lms_course, self.task_id)
             
             if not success:
                 logger.error("Database write failed")
