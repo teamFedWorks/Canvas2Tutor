@@ -6,7 +6,7 @@ import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-from models.canvas_models import CanvasCourse, CanvasModule, CanvasModuleItem, CanvasPage, CanvasQuiz, CanvasAssignment
+from models.canvas_models import CanvasCourse, CanvasModule, CanvasModuleItem, CanvasPage, CanvasQuiz, CanvasAssignment, CanvasDiscussion, CanvasWebLink
 from models.lms_models import (
     LmsCourse, LmsCurriculumModule, LmsCurriculumItem, LmsQuizConfig, 
     LmsAssignmentConfig, LmsGradeSettings, LmsStatus, LmsItemType
@@ -28,7 +28,8 @@ class CourseTransformer:
         canvas_course: CanvasCourse, 
         university_id: Optional[str] = None, 
         author_id: Optional[str] = None,
-        course_code: Optional[str] = None
+        course_code: Optional[str] = None,
+        department: Optional[str] = None
     ) -> tuple[LmsCourse, TransformationReport]:
         """
         Orchestrates transformation from CanvasCourse to LmsCourse.
@@ -41,25 +42,34 @@ class CourseTransformer:
         lms_course = LmsCourse(
             university=university_id or os.getenv("DEFAULT_UNIVERSITY_ID", "000000000000000000000000"),
             authorId=author_id or os.getenv("DEFAULT_AUTHOR_ID", "000000000000000000000000"),
-            authorName="Admin SFC",  # Default for imported courses
+            authorName="Admin SFC",
             title=canvas_course.title,
             slug=slug,
             courseUrl=slug,
             courseCode=course_code or "IMPORTED",
-            department="Imported",
+            department=department or "Imported",
             shortDescription=f"{canvas_course.title} — imported from Canvas LMS",
             description=f"Imported Course: {canvas_course.title}",
             canvas_course_id=canvas_course.identifier
         )
 
-        # Build lookup maps for fast access to content items
+        # Build lookup maps for fast access to content items.
+        # Key = identifier used when the content was parsed.
+        # Pages are keyed by their stem (filename without extension) from wiki_content/
+        # Quizzes and assignments are keyed by their directory name.
+        # Discussions and weblinks are keyed by their resource identifier (set in parser.py).
         pages_map = {p.identifier: p for p in canvas_course.pages}
         quizzes_map = {q.identifier: q for q in canvas_course.quizzes}
         assignments_map = {a.identifier: a for a in canvas_course.assignments}
+        discussions_map = {d.identifier: d for d in canvas_course.discussions}
+        weblinks_map = {w.identifier: w for w in canvas_course.weblinks}
 
         # Process Modules
         for c_module in canvas_course.modules:
-            lms_module = self._transform_module(c_module, pages_map, quizzes_map, assignments_map, report)
+            lms_module = self._transform_module(
+                c_module, pages_map, quizzes_map, assignments_map,
+                discussions_map, weblinks_map, report
+            )
             lms_course.curriculum.append(lms_module)
 
         logger.info("[CourseTransformer] Transformation complete", extra={
@@ -75,6 +85,8 @@ class CourseTransformer:
         pages_map: Dict[str, CanvasPage],
         quizzes_map: Dict[str, CanvasQuiz],
         assignments_map: Dict[str, CanvasAssignment],
+        discussions_map: Dict[str, CanvasDiscussion],
+        weblinks_map: Dict[str, CanvasWebLink],
         report: TransformationReport
     ) -> LmsCurriculumModule:
         """Transforms a Canvas module to a curriculum module."""
@@ -85,7 +97,10 @@ class CourseTransformer:
         )
 
         for item in c_module.items:
-            lms_item = self._transform_item(item, pages_map, quizzes_map, assignments_map, report)
+            lms_item = self._transform_item(
+                item, pages_map, quizzes_map, assignments_map,
+                discussions_map, weblinks_map, report
+            )
             if lms_item:
                 lms_module.items.append(lms_item)
 
@@ -97,6 +112,8 @@ class CourseTransformer:
         pages_map: Dict[str, CanvasPage],
         quizzes_map: Dict[str, CanvasQuiz],
         assignments_map: Dict[str, CanvasAssignment],
+        discussions_map: Dict[str, CanvasDiscussion],
+        weblinks_map: Dict[str, CanvasWebLink],
         report: TransformationReport
     ) -> Optional[LmsCurriculumItem]:
         """Maps a Canvas module item to a unified LmsCurriculumItem."""
@@ -104,38 +121,82 @@ class CourseTransformer:
             title=c_item.title,
             slug=self._slugify(c_item.title),
             _canvasId=c_item.identifier,
-            type="Lesson" # Default
+            type="Lesson"
         )
 
-        if c_item.content_type == 'page' and c_item.identifier in pages_map:
-            page = pages_map[c_item.identifier]
+        # Use _content_ref (the resource identifierref) for content lookup.
+        # Fall back to identifier for backwards compatibility.
+        lookup_key = getattr(c_item, '_content_ref', None) or c_item.identifier
+
+        # Carry the content_ref onto the LMS item so AssetUploader can match it
+        base_item._content_ref = lookup_key
+
+        if c_item.content_type == 'page':
+            page = pages_map.get(lookup_key)
             base_item.type = "Lesson"
-            base_item.content = page.body
-            return base_item
-            
-        elif c_item.content_type == 'quiz' and c_item.identifier in quizzes_map:
-            quiz = quizzes_map[c_item.identifier]
-            base_item.type = "Quiz"
-            base_item.content = quiz.description
-            base_item.quizConfig = LmsQuizConfig(
-                gradeSettings=LmsGradeSettings(maxScore=100.0), # Fallback
-                timeLimit=quiz.time_limit or 60,
-                attemptsAllowed=quiz.allowed_attempts,
-                showCorrectAnswers=quiz.show_correct_answers
-            )
-            return base_item
-            
-        elif c_item.content_type == 'assignment' and c_item.identifier in assignments_map:
-            assign = assignments_map[c_item.identifier]
-            base_item.type = "Assignment"
-            base_item.content = assign.description
-            base_item.assignmentConfig = LmsAssignmentConfig(
-                gradeSettings=LmsGradeSettings(maxScore=assign.points_possible or 100.0),
-                type="Individual"
-            )
+            if page:
+                base_item.content = page.body
+            # Always return — even without body, the item exists in the module
+            # and the AssetUploader will attach any file resources to it.
             return base_item
 
-        return None
+        elif c_item.content_type == 'quiz':
+            quiz = quizzes_map.get(lookup_key)
+            if quiz:
+                base_item.type = "Quiz"
+                # Use description if available; otherwise generate a minimal placeholder
+                # so the item isn't flagged as empty by the validator
+                if quiz.description and quiz.description.strip():
+                    base_item.content = quiz.description
+                elif quiz.questions:
+                    base_item.content = f"<p>Quiz: {quiz.title} — {len(quiz.questions)} question(s)</p>"
+                else:
+                    base_item.content = f"<p>Quiz: {quiz.title}</p>"
+                base_item.quizConfig = LmsQuizConfig(
+                    gradeSettings=LmsGradeSettings(maxScore=quiz.points_possible or 100.0),
+                    timeLimit=quiz.time_limit or 60,
+                    attemptsAllowed=quiz.allowed_attempts,
+                    showCorrectAnswers=quiz.show_correct_answers
+                )
+                return base_item
+            # Quiz declared in manifest but not parsed — keep as placeholder
+            base_item.type = "Quiz"
+            return base_item
+
+        elif c_item.content_type == 'assignment':
+            assign = assignments_map.get(lookup_key)
+            if assign:
+                base_item.type = "Assignment"
+                base_item.content = assign.description
+                base_item.assignmentConfig = LmsAssignmentConfig(
+                    gradeSettings=LmsGradeSettings(maxScore=assign.points_possible or 100.0),
+                    type="Individual"
+                )
+                return base_item
+            # Assignment declared but not parsed — keep as placeholder
+            base_item.type = "Assignment"
+            return base_item
+
+        elif c_item.content_type == 'discussion':
+            discussion = discussions_map.get(lookup_key)
+            base_item.type = "Lesson"
+            if discussion:
+                base_item.content = discussion.body
+            return base_item
+
+        elif c_item.content_type == 'weblink':
+            weblink = weblinks_map.get(lookup_key)
+            base_item.type = "Lesson"
+            if weblink:
+                base_item.content = (
+                    f'<p><a href="{weblink.url}" target="_blank" rel="noopener noreferrer">'
+                    f'{weblink.title}</a></p>'
+                )
+            return base_item
+
+        # Unknown / unresolved content type — keep as empty lesson so the
+        # module item is not silently dropped from the course structure.
+        return base_item
 
     def _slugify(self, text: str) -> str:
         """Standard slug generator."""

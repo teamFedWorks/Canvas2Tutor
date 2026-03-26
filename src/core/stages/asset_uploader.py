@@ -18,6 +18,7 @@ from botocore.exceptions import ClientError
 from bs4 import BeautifulSoup
 
 from models.lms_models import LmsCourse, LmsCurriculumModule, LmsCurriculumItem, LmsAttachment
+from models.canvas_models import CanvasCourse
 from config.lms_schemas import UPLOADABLE_EXTENSIONS, S3_KEY_TEMPLATE
 from observability.logger import get_logger
 
@@ -55,23 +56,115 @@ class AssetUploader:
         
         self.stats = {"uploaded": 0, "skipped": 0, "failed": 0}
 
-    def process_course_assets(self, lms_course: LmsCourse) -> LmsCourse:
-        """Alias for compatibility with newer pipeline calls."""
-        return self.process_course(lms_course)
-
-    def process_course(self, lms_course: LmsCourse) -> LmsCourse:
+    def process_course_assets(self, lms_course: LmsCourse, canvas_course: Optional[CanvasCourse] = None) -> LmsCourse:
         """
-        Iterate through all content in the course and migrate assets.
+        Full asset migration pass:
+          1. Scan HTML content for embedded asset URLs and rewrite to S3.
+          2. Upload all manifest webcontent file resources (PDFs, PPTXs, DOCXs, etc.)
+             and attach them to the matching curriculum item.
         """
         logger.info(f"Starting asset migration for course {self.course_id}")
 
+        # Pass 1: HTML-embedded assets (images, videos, linked files in content)
         for module in lms_course.curriculum:
             for item in module.items:
-                # Process main content and populate attachments
                 item.content = self._process_html(item.content, item.attachments)
+
+        # Pass 2: Manifest-declared file resources not embedded in HTML
+        if canvas_course and canvas_course.resources and self.source_dir:
+            self._upload_manifest_resources(lms_course, canvas_course)
 
         logger.info("Asset migration complete", extra=self.stats)
         return lms_course
+
+    def _upload_manifest_resources(self, lms_course: LmsCourse, canvas_course: CanvasCourse) -> None:
+        """
+        Upload every webcontent file resource declared in the manifest that has
+        an uploadable extension, then attach the S3 URL to the matching
+        LmsCurriculumItem (matched via _content_ref == resource identifier).
+
+        Matching strategy (in order):
+          1. Exact _content_ref match (resource identifierref stored on item)
+          2. Item title contains the filename stem (fuzzy title match)
+          3. Attach to the module that contains the closest title match
+          4. Last resort: first item of the first module
+        """
+        # Build lookup: resource_ref -> list of items (multiple items can share a resource)
+        ref_map: Dict[str, List[LmsCurriculumItem]] = {}
+        title_map: Dict[str, LmsCurriculumItem] = {}
+        fallback_item: Optional[LmsCurriculumItem] = None
+
+        for module in lms_course.curriculum:
+            for item in module.items:
+                for key in filter(None, [item._canvasId, getattr(item, '_content_ref', None)]):
+                    ref_map.setdefault(key, []).append(item)
+                title_key = re.sub(r'[^\w]', '', item.title.lower())
+                title_map[title_key] = item
+                if fallback_item is None:
+                    fallback_item = item
+
+        for res_id, resource in canvas_course.resources.items():
+            if not resource.href:
+                continue
+
+            ext = Path(resource.href).suffix.lower()
+            if ext not in UPLOADABLE_EXTENSIONS:
+                continue
+
+            local_file = self.source_dir / resource.href
+            if not local_file.exists():
+                self.stats["skipped"] += 1
+                continue
+
+            # Avoid re-uploading the same file, but still attach to the correct item
+            cache_key = resource.href
+            if cache_key in self.uploaded_assets:
+                s3_url = self.uploaded_assets[cache_key]
+            else:
+                s3_url = self._perform_s3_upload(local_file, local_file.name)
+                if s3_url:
+                    self.uploaded_assets[cache_key] = s3_url
+
+            if not s3_url:
+                continue
+
+            file_type = ext.upper().strip('.')
+            attachment = LmsAttachment(
+                name=local_file.name,
+                url=s3_url,
+                size=self._human_size(local_file),
+                type=file_type
+            )
+
+            # --- Matching strategy ---
+            target_items = ref_map.get(res_id, [])
+
+            if not target_items:
+                # Fuzzy title match on filename stem
+                stem_key = re.sub(r'[^\w]', '', local_file.stem.lower())
+                item = title_map.get(stem_key)
+                if not item:
+                    for key, candidate in title_map.items():
+                        if stem_key and (stem_key in key or key in stem_key):
+                            item = candidate
+                            break
+                target_items = [item] if item else ([fallback_item] if fallback_item else [])
+
+            for target_item in target_items:
+                if target_item and not any(a.url == s3_url for a in target_item.attachments):
+                    target_item.attachments.append(attachment)
+
+    def _human_size(self, path: Path) -> str:
+        """Return a human-readable file size string."""
+        try:
+            size = path.stat().st_size
+            for unit in ("B", "KB", "MB", "GB"):
+                if size < 1024:
+                    return f"{size:.1f}{unit}"
+                size /= 1024
+            return f"{size:.1f}TB"
+        except Exception:
+            return "0MB"
 
     def _process_html(self, html_content: str, asset_list: Optional[List[LmsAttachment]] = None) -> str:
         """

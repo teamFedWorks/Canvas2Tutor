@@ -62,7 +62,9 @@ DEFAULT_ASSIGNMENT_SETTINGS: dict = {
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".bmp", ".ico"}
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".ogv", ".mov", ".avi", ".mkv"}
 DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"}
-UPLOADABLE_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | DOCUMENT_EXTENSIONS
+# Additional file types that should be uploaded as downloadable attachments
+DOWNLOAD_EXTENSIONS = {".ipynb", ".csv", ".zip", ".txt", ".rb", ".py", ".js", ".json"}
+UPLOADABLE_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | DOCUMENT_EXTENSIONS | DOWNLOAD_EXTENSIONS
 
 # ---------------------------------------------------------------------------
 # S3 key prefix template

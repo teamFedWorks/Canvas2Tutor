@@ -61,6 +61,10 @@ output/
 # Upload data — large course content, not tracked in git
 storage/uploads/
 
+# Pipeline outputs — validation reports, ingestion outputs, temp files
+storage/outputs/
+storage/temp_s3/
+
 # Course data (optional - uncomment if you don't want to track course exports)
 # cs-*/
 # it-*/

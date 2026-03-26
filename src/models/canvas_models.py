@@ -68,13 +68,17 @@ class CanvasResource:
 class CanvasModuleItem:
     """
     Represents an item within a Canvas module.
-    Can be a page, assignment, quiz, or nested module.
+    Can be a page, assignment, quiz, discussion, weblink, or nested module.
     """
     title: str
     identifier: Optional[str] = None
-    content_type: Optional[str] = None  # 'page', 'assignment', 'quiz', 'discussion'
+    content_type: Optional[str] = None  # 'page', 'assignment', 'quiz', 'discussion', 'weblink'
     content_file: Optional[str] = None
     indent: int = 0
+    
+    # The resource identifierref from the manifest — used by the transformer
+    # to look up the correct parsed content object (page/quiz/assignment/etc.)
+    _content_ref: Optional[str] = field(default=None, metadata={"export": False})
     
     # Nested items (for sub-modules)
     items: List['CanvasModuleItem'] = field(default_factory=list)

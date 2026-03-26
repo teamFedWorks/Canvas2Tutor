@@ -96,17 +96,35 @@ class QuizParser:
             return None
     
     def _extract_title(self, root, quiz_dir: Path) -> str:
-        """Extract quiz title"""
+        """Extract quiz title — handles both namespaced and plain XML."""
+        # Try plain (no namespace)
         title_elem = find_element(root, './/title', {})
-        if title_elem is not None:
-            return get_element_text(title_elem, quiz_dir.name)
+        if title_elem is not None and title_elem.text:
+            return title_elem.text.strip()
+        # Try Canvas namespace
+        from config.canvas_schemas import CANVAS_NAMESPACES
+        title_elem = find_element(root, './/canvas:title', CANVAS_NAMESPACES)
+        if title_elem is not None and title_elem.text:
+            return title_elem.text.strip()
+        # Wildcard namespace fallback
+        for el in root.iter():
+            if el.tag.split('}')[-1] == 'title' and el.text and el.text.strip():
+                return el.text.strip()
         return quiz_dir.name
-    
+
     def _extract_description(self, root) -> str:
-        """Extract quiz description"""
-        desc_elem = find_element(root, './/description', {})
-        if desc_elem is not None:
-            return clean_html(get_element_text(desc_elem, ""))
+        """Extract quiz description — handles namespaced XML."""
+        from utils.html_utils import clean_html
+        import html
+        for tag_name in ('description', 'rubric'):
+            desc_elem = find_element(root, f'.//{tag_name}', {})
+            if desc_elem is not None:
+                text = get_element_text(desc_elem, "")
+                return clean_html(html.unescape(text)) if text else ""
+            # Wildcard namespace
+            for el in root.iter():
+                if el.tag.split('}')[-1] == tag_name and el.text:
+                    return clean_html(html.unescape(el.text))
         return ""
     
     def _extract_time_limit(self, root) -> Optional[int]:
@@ -122,27 +140,36 @@ class QuizParser:
     def find_all_quizzes(self) -> List[CanvasQuiz]:
         """
         Find and parse all quizzes in course directory.
-        
-        Returns:
-            List of CanvasQuiz objects
+        Scans:
+          - non_cc_assessments/ subdirectories
+          - Any root-level subdirectory containing assessment_meta.xml or assessment_qti.xml
+            (Canvas exports QTI into resource-ID-named folders at the course root)
         """
         quizzes = []
-        
-        # Check non_cc_assessments directory
+        seen_dirs = set()
+
+        def _try_parse(quiz_dir: Path):
+            if quiz_dir in seen_dirs:
+                return
+            seen_dirs.add(quiz_dir)
+            quiz = self.parse_quiz(quiz_dir)
+            if quiz:
+                quizzes.append(quiz)
+
+        # non_cc_assessments/ subdirectories
         assessments_dir = self.course_directory / "non_cc_assessments"
         if assessments_dir.exists():
             for quiz_dir in assessments_dir.iterdir():
                 if quiz_dir.is_dir():
-                    quiz = self.parse_quiz(quiz_dir)
-                    if quiz:
-                        quizzes.append(quiz)
-        
-        # Also check for quiz directories in root
+                    _try_parse(quiz_dir)
+
+        # Root-level subdirectories that contain QTI files
         for item in self.course_directory.iterdir():
-            if item.is_dir() and item.name != "non_cc_assessments":
-                if (item / "assessment_meta.xml").exists() or (item / "assessment.xml").exists():
-                    quiz = self.parse_quiz(item)
-                    if quiz:
-                        quizzes.append(quiz)
-        
+            if not item.is_dir() or item.name in ("non_cc_assessments", "wiki_content",
+                                                    "web_resources", "course_settings",
+                                                    "lti_resource_links"):
+                continue
+            if (item / "assessment_meta.xml").exists() or (item / "assessment_qti.xml").exists():
+                _try_parse(item)
+
         return quizzes

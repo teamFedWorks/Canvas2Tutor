@@ -120,6 +120,7 @@ class LmsCurriculumItem:
     
     # Traceability (not in target JSON but kept for internal use)
     _canvasId: Optional[str] = field(default=None, metadata={"export": False})
+    _content_ref: Optional[str] = field(default=None, metadata={"export": False})
 
 
 @dataclass

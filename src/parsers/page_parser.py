@@ -108,21 +108,47 @@ class PageParser:
                 return WorkflowState.DELETED
         return WorkflowState.ACTIVE
     
+    def parse_html_page(self, html_file: Path) -> Optional[CanvasPage]:
+        """Parse a wiki_content HTML file directly as a page."""
+        try:
+            with open(html_file, 'r', encoding='utf-8') as f:
+                raw = f.read()
+            from utils.html_utils import clean_html, get_body_content
+            body = get_body_content(raw) or clean_html(raw)
+            title = html_file.stem.replace('-', ' ').replace('_', ' ').title()
+            return CanvasPage(
+                title=title,
+                identifier=html_file.stem,
+                body=body,
+                workflow_state=WorkflowState.ACTIVE,
+                source_file=str(html_file)
+            )
+        except Exception as e:
+            self.errors.append(MigrationError(
+                severity=ErrorSeverity.WARNING,
+                error_type="PAGE_PARSE_ERROR",
+                message=f"Failed to parse HTML page: {e}",
+                file_path=str(html_file)
+            ))
+            return None
+
     def parse_all_pages(self) -> List[CanvasPage]:
         """
-        Parse all pages in wiki_content directory.
-        
-        Returns:
-            List of CanvasPage objects
+        Parse all pages in wiki_content directory (both XML and HTML).
         """
         pages = []
-        
+
         if not self.wiki_content_dir.exists():
             return pages
-        
+
         for page_file in self.wiki_content_dir.glob("*.xml"):
             page = self.parse_page(page_file)
             if page:
                 pages.append(page)
-        
+
+        for page_file in self.wiki_content_dir.glob("*.html"):
+            page = self.parse_html_page(page_file)
+            if page:
+                pages.append(page)
+
         return pages

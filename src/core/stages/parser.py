@@ -5,7 +5,7 @@ Orchestrates all parsers to build complete Canvas course model.
 """
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 from datetime import datetime
 
 from models.canvas_models import CanvasCourse
@@ -89,25 +89,34 @@ class Parser:
             return None, report
         
         # Step 2: Parse wiki pages.
-        # We extract content from all XML files identified as 'pages' in the manifest.
         pages = self.page_parser.parse_all_pages()
         
-        # Determine referenced_files set for orphan check later.
-        # This helps us differentiate between 'expected' files and 'extra' files.
         referenced_files = set()
         if course.resources:
-            # Map out every file the manifest knows about.
             referenced_files = set(r.href for r in course.resources.values() if r.href)
-            
-            # ADDITIONAL STEP: Process PPTX files.
-            # Canvas often exports PowerPoints as XML. We convert these to standard HTML pages.
+
+            # Build a map: href_stem -> resource_identifier
+            # This lets us re-key pages from their filename stem to the resource ID
+            # so the transformer can look them up by _content_ref (identifierref).
+            href_stem_to_res_id: Dict[str, str] = {}
+            for res_id, resource in course.resources.items():
+                if resource.href:
+                    stem = Path(resource.href).stem.lower()
+                    href_stem_to_res_id[stem] = res_id
+
+            # Re-key pages: replace file-stem identifier with the resource identifier
+            for page in pages:
+                stem_key = page.identifier.lower()
+                if stem_key in href_stem_to_res_id:
+                    page.identifier = href_stem_to_res_id[stem_key]
+
+            # Process PPTX webcontent resources
             for res_id, resource in course.resources.items():
                 if resource.type and 'webcontent' in resource.type.lower():
                     if resource.href and resource.href.lower().endswith('.pptx'):
                         file_path = self.course_directory / resource.href
                         if file_path.exists():
                             logger.info("Converting PPTX resource", extra={"path": resource.href})
-                            # Link the converted page to its original manifest identifier.
                             pptx_page = self.pptx_parser.parse_pptx(file_path, identifier=res_id)
                             if pptx_page:
                                 pages.append(pptx_page)

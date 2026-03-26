@@ -304,9 +304,12 @@ class ManifestParser:
         identifier = get_element_attribute(item_elem, 'identifier')
         identifierref = get_element_attribute(item_elem, 'identifierref')
         
-        # Determine content type and file from resource
+        # Determine content type and file from resource.
+        # IMPORTANT: we store the identifierref (resource ID) as the content_ref so
+        # the transformer can look up the correct page/quiz/assignment by resource ID.
         content_type = None
         content_file = None
+        content_ref = identifierref  # the resource identifier — used for content lookup
         
         if identifierref and identifierref in resources:
             resource = resources[identifierref]
@@ -314,18 +317,20 @@ class ManifestParser:
             
             # Infer content type from resource type
             if resource.type:
-                if 'assessment' in resource.type.lower():
+                res_type = resource.type.lower()
+                if 'assessment' in res_type:
                     content_type = 'quiz'
-                elif 'assignment' in resource.type.lower():
+                elif 'assignment' in res_type:
                     content_type = 'assignment'
-                elif 'webcontent' in resource.type.lower():
+                elif 'webcontent' in res_type:
                     content_type = 'page'
-                elif 'discussion' in resource.type.lower():
+                elif 'discussion' in res_type:
                     content_type = 'discussion'
-                elif 'associatedcontent' in resource.type.lower():
-                    # Associated content is often an assignment or page
-                    # We default to assignment if not mapped elsewhere, 
-                    # but logic might need refining. For now, treat as assignment check
+                elif 'weblink' in res_type or 'imswl' in res_type:
+                    content_type = 'weblink'
+                elif 'associatedcontent' in res_type:
+                    # AssociatedContent wraps assignments — the href points to the
+                    # assignment subfolder XML, so treat as assignment.
                     content_type = 'assignment'
         
         # Parse nested items (sub-items)
@@ -344,9 +349,12 @@ class ManifestParser:
             identifier=identifier,
             content_type=content_type,
             content_file=content_file,
+            # Store the resource identifierref so the transformer can resolve content
             items=nested_items,
             position=position,
             workflow_state=WorkflowState.ACTIVE
         )
+        # Attach the resource ref as a custom attribute for transformer lookup
+        module_item._content_ref = content_ref
         
         return module_item

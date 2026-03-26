@@ -128,10 +128,11 @@ class IngestionWorker:
         if on_progress: on_progress("transforming", 40, "Mapping to EduvateHub schema...")
         transformer = CourseTransformer()
         transformed_course, report = transformer.transform(
-            canvas_course, 
-            university_id, 
-            author_id
-            # course_code can be added here if available in adapter
+            canvas_course,
+            university_id,
+            author_id,
+            course_code=self._extract_course_code(canvas_course.title),
+            department=self._extract_department(canvas_course.title)
         )
 
         # 2. Asset Migration
@@ -146,7 +147,7 @@ class IngestionWorker:
             cdn_url=self.cdn_url,
             course_id=transformed_course.slug
         )
-        uploader.process_course_assets(transformed_course)
+        uploader.process_course_assets(transformed_course, canvas_course)
 
         # 3. Final Export
         if on_progress: on_progress("exporting", 90, "Saving to MongoDB...")
@@ -163,6 +164,9 @@ class IngestionWorker:
         # Track job in DB
         self.exporter.track_job(task_id, "N/A", "completed", course_id=course_id)
 
+        # Auto-generate validation report immediately after ingestion
+        self._run_post_ingestion_validation(course_id, canvas_course.title)
+
         return {
             "status": "success",
             "course_id": course_id,
@@ -170,9 +174,70 @@ class IngestionWorker:
             "task_id": task_id
         }
 
+    def _run_post_ingestion_validation(self, course_id: str, title: str) -> None:
+        """
+        Automatically runs the validation report after every successful ingestion.
+        Saves HTML + JSON to storage/outputs/validation_<slug>.html
+        """
+        try:
+            import sys
+            from pathlib import Path
+            scripts_dir = Path(__file__).parent.parent.parent / "scripts"
+            if str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+            from validate_ingestion import run_validation, save_report
+            logger.info(f"Running post-ingestion validation for course {course_id}...")
+            rep = run_validation(course_id, by_slug=False, strict=False, quiet=True)
+            out_dir = Path(__file__).parent.parent.parent / "storage" / "outputs"
+            html_path = save_report(rep, out_dir, emit_json=True)
+            logger.info(f"Validation report saved: {html_path}",
+                        extra={"verdict": rep.verdict.value, "manual_tasks": len(rep.manual_tasks)})
+            msg = (f"\n[REPORT] Validation Report: {html_path}\n"
+                   f"         {rep.verdict_label}\n")
+            if rep.manual_tasks:
+                msg += f"         {len(rep.manual_tasks)} manual task(s) required — see report for details.\n"
+            sys.stdout.buffer.write(msg.encode("utf-8", errors="replace"))
+            sys.stdout.buffer.flush()
+        except Exception as e:
+            logger.warning(f"Post-ingestion validation failed (non-fatal): {e}")
+
     def _discover_program_name(self, canvas_course) -> str:
         """Derive program name from course metadata or fallback."""
         return "General Onboarding"
+
+    def _extract_course_code(self, title: str) -> str:
+        """
+        Extract a course code from the course title.
+        Handles patterns like:
+          'IT-1104-01-25/FA'  -> 'IT-1104'
+          'PHI-1114 Logic...' -> 'PHI-1114'
+          'CS 101 Intro...'   -> 'CS-101'
+        """
+        import re
+        # Match standard course code patterns: LETTERS-DIGITS or LETTERS DIGITS
+        match = re.match(r'^([A-Z]{2,6}[-\s]\d{3,4})', title.strip(), re.IGNORECASE)
+        if match:
+            return match.group(1).replace(' ', '-').upper()
+        return "IMPORTED"
+
+    def _extract_department(self, title: str) -> str:
+        """Derive department from course code prefix."""
+        import re
+        match = re.match(r'^([A-Z]{2,6})', title.strip(), re.IGNORECASE)
+        if match:
+            prefix = match.group(1).upper()
+            dept_map = {
+                "IT": "Information Technology",
+                "CS": "Computer Science",
+                "PHI": "Philosophy",
+                "ENT": "Entrepreneurship",
+                "BUS": "Business",
+                "ENG": "English",
+                "MAT": "Mathematics",
+                "SCI": "Science",
+            }
+            return dept_map.get(prefix, prefix)
+        return "Imported"
 
     def process_package(self, zip_path: Path, university_id: str, author_id: str, **kwargs) -> Dict[str, Any]:
         """Legacy compatibility for batch scripts."""
